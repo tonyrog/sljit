@@ -3462,6 +3462,8 @@ static void sljit_reset_read_only_buffers(struct sljit_read_only_buffer *buffers
 #	include "sljitNativeS390X.c"
 #elif (defined SLJIT_CONFIG_LOONGARCH && SLJIT_CONFIG_LOONGARCH)
 #	include "sljitNativeLOONGARCH_64.c"
+#elif (defined SLJIT_CONFIG_EMULATOR && SLJIT_CONFIG_EMULATOR)
+#	include "sljitEmulator.c"
 #endif /* SLJIT_CONFIG_X86 */
 
 #include "sljitSerialize.c"
@@ -3741,7 +3743,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_fmem_update(struct sljit_compiler 
 	&& !(defined SLJIT_CONFIG_ARM && SLJIT_CONFIG_ARM) \
 	&& !(defined SLJIT_CONFIG_S390X && SLJIT_CONFIG_S390X) \
 	&& !(defined SLJIT_CONFIG_RISCV && SLJIT_CONFIG_RISCV) \
-	&& !(defined SLJIT_CONFIG_LOONGARCH && SLJIT_CONFIG_LOONGARCH)
+	&& !(defined SLJIT_CONFIG_LOONGARCH && SLJIT_CONFIG_LOONGARCH) \
+	&& !(defined SLJIT_CONFIG_EMULATOR && SLJIT_CONFIG_EMULATOR)
 
 SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_mov(struct sljit_compiler *compiler, sljit_s32 type,
 	sljit_s32 vreg,
