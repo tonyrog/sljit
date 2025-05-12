@@ -4,7 +4,6 @@ int CAT2(load_mem_,TP)(TYPE* ptr, sljit_sw addr, emulator_state_t* st)
 {
     if ((addr < 0) || (addr > (sljit_sw)(st->mem_size-sizeof(TYPE))))
 	return -1;
-    fprintf(stderr, "load_mem: addr=%ld\r\n", addr);
     *ptr = *((TYPE*) (st->mem_base+addr));
     return 0;
 }
@@ -19,9 +18,9 @@ int CAT2(load_,TP)(TYPE* ptr, sljit_s32 src, sljit_sw srcw, emulator_state_t* st
 	int r1;
 	if (((r1 = src & 0x7f) == 0) || (r1 > SLJIT_NUMBER_OF_REGISTERS))
 	    return -1;
-	*ptr = st->r[r1-1].TP;
+	*ptr = st->fr[r1-1].TP;
 	return 0;
-    }    
+    }
     else {
 	sljit_sw addr = effective_addr(src, srcw, st);
 	if (addr < 0)
@@ -32,7 +31,7 @@ int CAT2(load_,TP)(TYPE* ptr, sljit_s32 src, sljit_sw srcw, emulator_state_t* st
 
 int CAT2(store_mem_,TP)(TYPE val, sljit_sw addr, emulator_state_t* st)
 {
-    if ((addr < 0) || (addr > (sljit_sw)(st->mem_size-sizeof(TYPE))))
+    if ((addr < 0) || (addr > (sljit_sw)(st->mem_size-sizeof(TYPE))))    
 	return -1;
     *((TYPE*) (st->mem_base+addr)) = val;
     return 0;
@@ -47,7 +46,7 @@ int CAT2(store_,TP)(TYPE val, sljit_s32 dst, sljit_sw dstw, emulator_state_t* st
 	int r1;
 	if (((r1 = dst & 0x7f) == 0) || (r1 > SLJIT_NUMBER_OF_REGISTERS))
 	    return -1;
-	st->r[r1-1].TP = val;
+	st->fr[r1-1].TP = val;
 	return 0;
     }
     else {

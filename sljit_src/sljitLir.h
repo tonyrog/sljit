@@ -2611,6 +2611,58 @@ Notes:
 SLJIT_API_FUNC_ATTRIBUTE struct sljit_compiler *sljit_deserialize_compiler(sljit_uw* buffer, sljit_uw size,
 	sljit_s32 options, void *allocator_data);
 
+/* Emulator defs */
+    
+#ifndef VSIZE
+#define VSIZE 16
+#endif
+    
+typedef struct {
+    union {
+	sljit_u8  vi8[VSIZE/(sizeof(sljit_u8))];
+	sljit_u16 vi16lem[VSIZE/(sizeof(sljit_u16))];
+	sljit_u32 vi32[VSIZE/(sizeof(sljit_u32))];
+	sljit_f32 vf32[VSIZE/(sizeof(sljit_f32))];
+	sljit_f64 vf64[VSIZE/(sizeof(sljit_f64))];
+    };
+} vec_t;
+
+typedef union {
+    sljit_sw  sw;
+    sljit_uw  uw;
+    sljit_s32 s32;
+    sljit_s16 s16;    
+    sljit_s8  s8;
+    sljit_u32 u32;
+    sljit_u16 u16;
+    sljit_u8  u8;
+    sljit_uw  ptr;
+} reg_t;
+
+typedef union {
+    sljit_f32 f32;
+    sljit_f64 f64;    
+} freg_t;
+
+typedef sljit_uw cpu_flags_t;
+
+typedef struct {
+    cpu_flags_t flags;
+    reg_t      r[SLJIT_NUMBER_OF_EMU_REGISTERS];          // SLJIT_R(i)
+    freg_t    fr[SLJIT_NUMBER_OF_EMU_FLOAT_REGISTERS];    // SLJIT_FR(i)
+    vec_t     vr[SLJIT_NUMBER_OF_EMU_VECTOR_REGISTERS];   // SLKIT_VR(i)
+    size_t    mem_size;                               // in bytes
+    sljit_u8* mem_base;                               // word aligned memory
+} emulator_state_t;
+
+ 
+SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_run(emulator_state_t* state,
+					     void* code, size_t code_size,
+					     void* addr,
+					     void* args,
+					     sljit_s32 arg_types,
+					     void* ret);
+
 /* --------------------------------------------------------------------- */
 /*  Miscellaneous utility functions                                      */
 /* --------------------------------------------------------------------- */
