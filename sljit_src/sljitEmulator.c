@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <byteswap.h>
+#include <math.h>
 
 // instruction formats (so far)
 typedef enum {
@@ -62,7 +63,7 @@ typedef struct {
     union {
 	struct {
 	    sljit_s32 op;
-	    sljit_s32 type;    
+	    sljit_s32 type;
 	    sljit_s32 dst; sljit_sw dstw;
 	    sljit_s32 src1; sljit_sw src1w;
 	    sljit_s32 src2; sljit_sw src2w;
@@ -103,18 +104,27 @@ typedef struct {
 #define CAT_HELPER2(x,y) x ## y
 #define CAT2(x,y) CAT_HELPER2(x,y)
 
+#define U32_MAX    0xffffffff
+#define S32_MAX    0x7fffffff
+#define S32_MIN   -0x80000000
 
 #if __SIZEOF_LONG__ == 4
 typedef int64_t sljit_sww;
 typedef uint64_t sljit_uww;
 #define SWMASK    0xffffffff
 #define UWMASK    0xffffffff
+#define UW_MAX    0xffffffff
+#define SW_MAX    0x7fffffff
+#define SW_MIN   -0x80000000
 #define bswap_uw(x) bswap_32((x))
 #elif __SIZEOF_LONG__ == 8
 typedef __int128_t sljit_sww;
 typedef __uint128_t sljit_uww;
 #define SWMASK    0xffffffffffffffff
 #define UWMASK    0xffffffffffffffff
+#define UW_MAX    0xffffffffffffffff
+#define SW_MAX    0x7fffffffffffffff
+#define SW_MIN   -0x8000000000000000
 #define bswap_uw(x) bswap_64((x))
 #endif
 
@@ -128,10 +138,15 @@ typedef __uint128_t sljit_uww;
 #define VR(st,i)  ((st)->vr[(i)])
 
 // flags field
-#define FLAG_C    0x1   // carry
-#define FLAG_V    0x2   // overflow
-#define FLAG_Z    0x4   // zero
-#define FLAG_N    0x8   // negative
+#define FLAG_C    0x01   // carry
+#define FLAG_V    0x02   // overflow
+#define FLAG_Z    0x04   // zero
+#define FLAG_N    0x08   // negative
+#define FLAG_L    0x10   // less (float)
+#define FLAG_G    0x20   // greater (float)
+#define FLAG_E    0x40   // equal (float)
+#define FLAGS_LGE (FLAG_L|FLAG_G|FLAG_E)
+#define FLAGS_CVZN (FLAG_C|FLAG_V|FLAG_Z|FLAG_N)
 
 #define FLAGS_ALL(st,fs) (((st)->flags & (fs)) == (fs))
 #define FLAGS_ANY(st,fs) (((st)->flags & (fs)) != 0)
@@ -208,116 +223,256 @@ static sljit_sw effective_addr(sljit_s32 dst, sljit_sw dstw, emulator_state_t* s
 #define INC_SIZE(s) compiler->size += (s)
 #define UNUSED(v) (void) v
 
-static inline void set_flags_addc(cpu_flags_t* fp, sljit_uw a, sljit_uw b, sljit_uw c)
+// extract flags from operation
+static inline sljit_s32 get_flags(sljit_s32 op)
 {
-    (void) b;
-    int f = ((c < a)) ? FLAG_C : 0;
+    cpu_flags_t f = 0;    
+    f = (op & SLJIT_SET_Z) ? FLAG_Z : 0;
+    f |= (GET_FLAG_TYPE(op) == GET_FLAG_TYPE(SLJIT_SET_CARRY)) ? FLAG_C : 0;
+    f |= (GET_FLAG_TYPE(op) == SLJIT_OVERFLOW) ? FLAG_V : 0;
+    // more flags to generate...
+    return f;
+}
+
+static inline void set_flags_addc(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, sljit_uw c)
+{
+    UNUSED(b);
+    cpu_flags_t f = 0;    
+    if ((set & FLAG_C) && (c < a)) f |= FLAG_C;
     *fp = (*fp & ~(FLAG_C)) | f;
 }
 
-static inline void set_flags_add(cpu_flags_t* fp, sljit_uw a, sljit_uw b, sljit_uw c)
-{
-    int f = 0;
-    if (c == 0) f |= FLAG_Z;
-    if ((c >> (UWSIZE-1)) & 1) f |= FLAG_N;
-    if ((c < a)) f |= FLAG_C;
-    if ((((a ^ c) & (b ^ c)) >> (UWSIZE-1)) & 1) f |= FLAG_V;
-    *fp = (*fp & ~(FLAG_C|FLAG_V|FLAG_Z|FLAG_N)) | f;
-}
-
-static inline void set_flags_subc(cpu_flags_t* fp, sljit_uw a, sljit_uw b, sljit_uw c)
-{    
-    (void) c;
-    cpu_flags_t f = ((a < b)) ? FLAG_C : 0;
-    *fp = (*fp & ~(FLAG_C)) | f;
-}
-
-static inline void set_flags_sub(cpu_flags_t* fp, sljit_uw a, sljit_uw b, sljit_uw c)
+static inline void set_flags_add(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, sljit_uw c)
 {
     cpu_flags_t f = 0;
-    if (c == 0) f |= FLAG_Z;
-    if ((c >> (UWSIZE-1)) & 1) f |= FLAG_N;
-    if ((a < b)) f |= FLAG_C;
-    if ((((a ^ b) & (a ^ c)) >> (UWSIZE-1)) & 1) f |= FLAG_V;
-    *fp = (*fp & ~(FLAG_C|FLAG_V|FLAG_Z|FLAG_N)) | f;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    if ((set & FLAG_N) && ((c >> (UWSIZE-1)) & 1)) f |= FLAG_N;
+    if ((set & FLAG_C) && (c < a)) f |= FLAG_C;
+    if ((set & FLAG_V) && ((((a ^ c) & (b ^ c)) >> (UWSIZE-1)) & 1))
+	f |= FLAG_V;
+    *fp = (*fp & ~FLAGS_CVZN) | f;
 }
 
-// overflow?
-static inline void set_flags_mul(cpu_flags_t* fp, sljit_sw a, sljit_sw b, sljit_sw c)
-{
-    sljit_sww cc =(sljit_sww) a * (sljit_sww) b;
-    cpu_flags_t f = (((sljit_sw) cc) != c) ? FLAG_V : 0;
-    fprintf(stderr, "f=%ld, c = %lx, cc=%llx\r\n", f, c, cc);
-    *fp = (*fp & ~(FLAG_V)) | f;
-}
-
-static inline void set_flags_logic(cpu_flags_t *fp, sljit_uw c)
-{
-    cpu_flags_t f = (c==0) ? FLAG_C : 0;
+static inline void set_flags_subc(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, sljit_uw c)
+{    
+    (void) c;
+    cpu_flags_t f = 0;
+    if ((set & FLAG_C) && (a < b)) f |= FLAG_C;
     *fp = (*fp & ~(FLAG_C)) | f;
 }
 
-static inline void set_flags_zero(cpu_flags_t *fp, sljit_uw c)
+static inline void set_flags_sub(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, sljit_uw c)
 {
-    int f = (c==0) ? FLAG_Z : 0;
+    cpu_flags_t f = 0;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    if ((set & FLAG_N) && ((c >> (UWSIZE-1)) & 1)) f |= FLAG_N;
+    if ((set & FLAG_C) && (a < b)) f |= FLAG_C;
+    if ((set & FLAG_V) && ((((a ^ b) & (a ^ c)) >> (UWSIZE-1)) & 1))
+	f |= FLAG_V;
+    *fp = (*fp & ~FLAGS_CVZN) | f;
+}
+
+
+// ???? FIXME ZERO?
+static inline void set_flags_logic(cpu_flags_t* fp, cpu_flags_t set, sljit_uw c)
+{
+    cpu_flags_t f = 0;
+    if ((set & FLAG_C) && (c == 0)) f |= FLAG_C;
+    *fp = (*fp & ~(FLAG_C)) | f;
+}
+
+static inline void set_flags_zero(cpu_flags_t* fp, cpu_flags_t set, sljit_uw c)
+{
+    cpu_flags_t f = 0;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_C;
     *fp = (*fp & ~(FLAG_Z)) | f;
 }
 
 
-static inline void set_flags_addc32(cpu_flags_t* fp, sljit_u32 a, sljit_u32 b, sljit_u32 c)
+static inline void set_flags_addc32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a, sljit_u32 b, sljit_u32 c)
 {
-    (void) b;
-    int f = (c < a) ? FLAG_C : 0;
+    UNUSED(b);
+    cpu_flags_t f = 0;    
+    if ((set & FLAG_C) && (c < a)) f |= FLAG_C;
     *fp = (*fp & ~(FLAG_C)) | f;    
 }
 
-static inline void set_flags_add32(cpu_flags_t* fp, sljit_u32 a, sljit_u32 b, sljit_u32 c)
+static inline void set_flags_add32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a, sljit_u32 b, sljit_u32 c)
 {
-    int f = 0;
-    if (c == 0) f |= FLAG_Z;
-    if ((c >> (U32SIZE-1)) & 1) f |= FLAG_N;
-    if ((c < a)) f |= FLAG_C;
-    if ((((a ^ c) & (b ^ c)) >> (U32SIZE-1)) & 1) f |= FLAG_V;    
-    *fp = (*fp & ~(FLAG_C|FLAG_V|FLAG_Z|FLAG_N)) | f;
+    cpu_flags_t f = 0;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    if ((set & FLAG_N) && ((c >> (U32SIZE-1)) & 1)) f |= FLAG_N;
+    if ((set & FLAG_C) && (c < a)) f |= FLAG_C;
+    if ((set & FLAG_V) && ((((a ^ c) & (b ^ c)) >> (U32SIZE-1)) & 1))
+	f |= FLAG_V;
+    *fp = (*fp & ~FLAGS_CVZN) | f;
 }
 
-static inline void set_flags_subc32(cpu_flags_t* fp, sljit_u32 a, sljit_u32 b, sljit_u32 c)
+static inline void set_flags_subc32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a, sljit_u32 b, sljit_u32 c)
 {
     (void) c;
-    int f = (a < b) ? FLAG_C : 0;
-    *fp = (*fp & ~(FLAG_C)) | f;    
-}
-
-static inline void set_flags_sub32(cpu_flags_t* fp, sljit_u32 a, sljit_u32 b, sljit_u32 c)
-{
-    int f = 0;
-    if (c == 0) f |= FLAG_Z;
-    if ((c >> (U32SIZE-1)) & 1) f |= FLAG_N;
-    if ((a < b)) f |= FLAG_C;
-    if ((((a ^ b) & (a ^ c)) >> (U32SIZE-1)) & 1) f |= FLAG_V;
-    *fp = (*fp & ~(FLAG_C|FLAG_V|FLAG_Z|FLAG_N)) | f;    
-}
-
-// overflow?
-static inline void set_flags_mul32(cpu_flags_t* fp, sljit_s32 a, sljit_s32 b, sljit_s32 c)
-{
-    int64_t cc = (int64_t)a * (int64_t)b;
-    int f = (((sljit_s32)cc) != c) ? FLAG_V : 0;
-    *fp = (*fp & ~(FLAG_V)) | f;
-}
-
-
-static inline void set_flags_logic32(cpu_flags_t *fp, sljit_u32 c)
-{
-    int f = (c==0) ? FLAG_C : 0;
+    cpu_flags_t f = 0;
+    if ((set & FLAG_C) && (a < b)) f |= FLAG_C;
     *fp = (*fp & ~(FLAG_C)) | f;
 }
 
-static inline void set_flags_zero32(cpu_flags_t *fp, sljit_u32 c)
+static inline void set_flags_sub32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a, sljit_u32 b, sljit_u32 c)
 {
-    int f = (c==0) ? FLAG_Z : 0;
-    *fp = (*fp & ~(FLAG_Z)) | f;
+    cpu_flags_t f = 0;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    if ((set & FLAG_N) && ((c >> (U32SIZE-1)) & 1)) f |= FLAG_N;
+    if ((set & FLAG_C) && (a < b)) f |= FLAG_C;
+    if ((set & FLAG_V) && ((((a ^ b) & (a ^ c)) >> (U32SIZE-1)) & 1))
+	f |= FLAG_V;
+    *fp = (*fp & ~FLAGS_CVZN) | f;
 }
+
+
+
+static inline void set_flags_logic32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 c)
+{
+    cpu_flags_t f = 0;
+    if ((set & FLAG_C) && (c == 0)) f |= FLAG_C;
+    *fp = (*fp & ~(FLAG_C)) | f;    
+}
+
+static inline void set_flags_zero32(cpu_flags_t*fp, cpu_flags_t set, sljit_u32 c)
+{
+    cpu_flags_t f = 0;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_C;
+    *fp = (*fp & ~(FLAG_Z)) | f;    
+}
+
+#if 0
+static inline void set_flags_mul(cpu_flags_t* fp, cpu_flags_t set, sljit_sw a, sljit_sw b, sljit_sw c)
+{
+    cpu_flags_t f = 0;
+    if (set & FLAG_V) {
+	sljit_sww cc =(sljit_sww) a * (sljit_sww) b;
+	if (((sljit_sw) cc) != c) f |= FLAG_V;
+    }
+    *fp = (*fp & ~(FLAG_V)) | f;
+}
+#endif
+
+// EQUAL_F | LESS_F | GREATER_EQUAL_F | GREATER_F | LESS_EQUAL_F
+static void cmp_f32(cpu_flags_t* fp, sljit_f32 a, sljit_f32 b)
+{
+    cpu_flags_t f = 0;
+
+    if (a < b)   f |= FLAG_L;
+    if (a > b)   f |= FLAG_G;
+    if (a == b)  f |= FLAG_E;
+    *fp = (*fp & ~(FLAGS_LGE)) | f;
+}
+
+static void cmp_f64(cpu_flags_t* fp, sljit_f64 a, sljit_f64 b)
+{
+    cpu_flags_t f = 0;
+
+    if (a < b)   f |= FLAG_L;
+    if (a > b)   f |= FLAG_G;
+    if (a == b)  f |= FLAG_E;
+    *fp = (*fp & ~(FLAGS_LGE)) | f;
+}
+
+
+static void mul_s32(cpu_flags_t* fp, cpu_flags_t set, sljit_s32 a, sljit_s32 b, sljit_s32* c)
+{
+    cpu_flags_t f = 0;
+    if (set & FLAG_V) {
+	if ((a == 0) || (b == 0))
+	    *c = 0;
+	else if (((a == -1) && (b == (sljit_s32)S32_MIN)) ||
+		 ((b == -1) && (a ==  (sljit_s32)S32_MIN))) {
+	    f = FLAG_V;
+	    *c = S32_MIN;
+	}
+	else {
+	    sljit_s32 r = a * b;
+	    if (((a > 0) && (b > 0) && (r < 0)) ||
+		((a < 0) && (b < 0) && (r < 0)) ||
+		((a > 0) && (b < 0) && (r > 0)) ||
+		((a < 0) && (b > 0) && (r > 0))) {
+		f = FLAG_V;
+	    }
+	    *c = r;
+	}
+    }
+    else {
+	*c = a * b;
+    }
+    *fp = (*fp & ~(FLAG_V)) | f;
+}
+
+#if 0
+static void mul_u32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a, sljit_u32 b, sljit_u32* c)
+{
+    cpu_flags_t f = 0;
+    if (set & FLAG_V) {
+	if ((a == 0) || (b == 0))
+	    *c = 0;
+	else {
+	    *c = a * b;
+	    if (b > U32_MAX / a)
+		f = FLAG_V;
+	}
+    }
+    else {
+	*c = a * b;
+    }
+    *fp = (*fp & ~(FLAG_V)) | f;
+}
+#endif
+
+
+static void mul_sw(cpu_flags_t* fp, cpu_flags_t set, sljit_sw a, sljit_sw b, sljit_sw* c)
+{
+    cpu_flags_t f = 0;
+    if (set & FLAG_V) {
+	if ((a == 0) || (b == 0))
+	    *c = 0;
+	else if (((a == -1) && (b == (sljit_sw)SW_MIN)) ||
+		 ((b == -1) && (a == (sljit_sw)SW_MIN))) {
+	    f = FLAG_V;
+	    *c = (sljit_sw)S32_MIN;
+	}
+	else {
+	    sljit_sw r = a * b;
+	    if (((a > 0) && (b > 0) && (r < 0)) ||
+		((a < 0) && (b < 0) && (r < 0)) ||
+		((a > 0) && (b < 0) && (r > 0)) ||
+		((a < 0) && (b > 0) && (r > 0))) {
+		f = FLAG_V;
+	    }
+	    *c = r;
+	}
+    }
+    else {
+	*c = a * b;
+    }
+    *fp = (*fp & ~(FLAG_V)) | f;
+}
+
+#if 0
+static void mul_uw(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, sljit_uw* c)
+{
+    cpu_flags_t f = 0;
+    if (set & FLAG_V) {
+	if ((a == 0) || (b == 0))
+	    *c = 0;
+	else {
+	    *c = a * b;
+	    if (b > U32_MAX / a)
+		f = FLAG_V;
+	}
+    }
+    else {
+	*c = a * b;
+    }
+    *fp = (*fp & ~(FLAG_V)) | f;
+}
+#endif
 
 static sljitter_inst_t* new_inst(struct sljit_compiler *compiler,
 				 sljitter_fmt_t fmt,
@@ -331,6 +486,7 @@ static sljitter_inst_t* new_inst(struct sljit_compiler *compiler,
     ip->type = type;
     return ip;
 }
+
 
 static void dump_state(emulator_state_t* st)
 {
@@ -352,6 +508,15 @@ static void dump_state(emulator_state_t* st)
     }
 }
 
+//
+// sljit opcodes:
+//         0-63     0-255 opcode
+//         fffffnz3 xxxxxxxx
+//              |||  
+//              ||+-- SLJIT_32 32-bit operation
+//              |+--- SLJIT_SET_Z  zero flag
+//              +----- inverted flags value
+//
 static void emu(emulator_state_t* st, sljitter_inst_t* prog, size_t size,
 		sljit_sw pc)
 {
@@ -374,8 +539,6 @@ next:
 	break;
     case FMT_OP_SRC:
     case FMT_OP_DST:
-    case FMT_FOP1:
-    case FMT_FOP2:
 	break;
     case FMT_FSET32:
 	store_f32(prog[pc].f32_val,prog[pc].dst, 0, st);
@@ -384,7 +547,7 @@ next:
 	store_f64(prog[pc].f64_val,prog[pc].dst, 0, st);
 	break;
     case FMT_FCOPY:   // dst=freg, src1=reg
-	switch(prog[pc].op) {
+	switch(GET_OPCODE(prog[pc].op)) {
 	case SLJIT_COPY_TO_F64: {
 	    union {
 		sljit_uw  u;
@@ -432,15 +595,17 @@ next:
 	    sljit_s32 a, b;
 	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_s32(&b, prog[pc].src2, prog[pc].src2w, st);
-	    set_flags_sub32(&st->flags, (sljit_u32) a, (sljit_u32) b,
+	    set_flags_sub32(&st->flags, FLAGS_CVZN,
+			    (sljit_u32) a, (sljit_u32) b,
 			    ((sljit_u32)a-(sljit_u32)b));
 	}
 	else {
 	    sljit_sw a, b;
 	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_sw(&b, prog[pc].src2, prog[pc].src2w, st);
-	    set_flags_sub(&st->flags, (sljit_uw) a, (sljit_uw) b,
-			    ((sljit_uw)a-(sljit_uw)b));
+	    set_flags_sub(&st->flags, FLAGS_CVZN,
+			  (sljit_uw) a, (sljit_uw) b,
+			  ((sljit_uw)a-(sljit_uw)b));
 	}
 	switch(prog[pc].type & 0xff) {
 	case SLJIT_EQUAL:
@@ -507,12 +672,24 @@ next:
 	case SLJIT_ATOMIC_STORED:  break;
 	case SLJIT_ATOMIC_NOT_STORED:  break;
 	    // floatint point
-	case SLJIT_F_EQUAL: break;
-	case SLJIT_F_NOT_EQUAL: break;
-	case SLJIT_F_LESS: break;
-	case SLJIT_F_GREATER_EQUAL: break;
-	case SLJIT_F_GREATER: break;
-	case SLJIT_F_LESS_EQUAL: break;
+	case SLJIT_F_EQUAL:
+	    r = FLAGS_ALL(st,FLAG_E) && FLAGS_NONE(st,FLAG_L|FLAG_G);
+	    break;
+	case SLJIT_F_NOT_EQUAL:
+	    r = FLAGS_NONE(st,FLAG_E) && FLAGS_ANY(st,FLAG_L|FLAG_G);
+	    break;
+	case SLJIT_F_LESS:
+	    r = FLAGS_NONE(st,FLAG_E|FLAG_G) && FLAGS_ALL(st,FLAG_L);
+	    break;
+	case SLJIT_F_GREATER_EQUAL:
+	    r = FLAGS_NONE(st,FLAG_L) && FLAGS_ANY(st,FLAG_G|FLAG_E);
+	    break;	    
+	case SLJIT_F_GREATER:
+	    r = FLAGS_NONE(st,FLAG_L|FLAG_E) && FLAGS_ALL(st,FLAG_G);
+	    break;
+	case SLJIT_F_LESS_EQUAL:
+	    r = FLAGS_ANY(st,FLAG_L|FLAG_E) && FLAGS_NONE(st,FLAG_G);
+	    break;
 	case SLJIT_UNORDERED: break;
 	case SLJIT_ORDERED: break;
         /* Ordered / unordered floating point comparison types.
@@ -540,7 +717,7 @@ next:
 	break;
 	
     case FMT_OP0:
-	switch(prog[pc].op) {
+	switch(GET_OPCODE(prog[pc].op)) {
 	case SLJIT_BREAKPOINT:
 	    break;
 	case SLJIT_NOP:
@@ -625,7 +802,7 @@ next:
 	break;
 	
     case FMT_OP1:
-	switch(prog[pc].op) {
+	switch(GET_OPCODE(prog[pc].op)) {
 	case SLJIT_MOV: {
 	    sljit_sw a;
 	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
@@ -641,9 +818,7 @@ next:
 	case SLJIT_MOV_U8:
 	case SLJIT_MOV32_U8: {
 	    uint8_t a;
-	    sljit_sw addr = effective_addr(prog[pc].src1, prog[pc].src1w, st);
 	    load_u8(&a, prog[pc].src1, prog[pc].src1w, st);
-	    fprintf(stderr, "mov_u8: mem[%ld] = %d\r\n", addr, a);
 	    store_u8(a, prog[pc].dst, prog[pc].dstw, st);
 	    break;	    
 	}
@@ -774,70 +949,70 @@ next:
 	prog[pc].dst = 0; // signal no storage dst=0
 	// fall-through 
     case FMT_OP2:
-	if (prog[pc].op & SLJIT_32) {
+	if (GET_OPCODE(prog[pc].op) & SLJIT_32) {
 	    sljit_s32 a, b, c;
+	    sljit_s32 setf = get_flags(prog[pc].op);
 	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_s32(&b, prog[pc].src2, prog[pc].src2w, st);
-	    switch(prog[pc].op & ~SLJIT_32) {
+	    switch(GET_OPCODE(prog[pc].op) & ~SLJIT_32) {
 	    case SLJIT_ADD:
 		c = a+b;
-		set_flags_add32(&st->flags,
+		set_flags_add32(&st->flags, setf,
 				(sljit_u32) a, (sljit_u32) b, (sljit_u32) c);
 		break;
 	    case SLJIT_ADDC:
 		c = a+b;
-		set_flags_addc32(&st->flags,
+		set_flags_addc32(&st->flags, setf,
 				 (sljit_u32)a, (sljit_u32)b, (sljit_u32) c);
 		break;
 	    case SLJIT_SUB:
 		c = a-b;
-		set_flags_sub32(&st->flags,
+		set_flags_sub32(&st->flags, setf,
 				(sljit_u32) a, (sljit_u32) b, (sljit_u32) c);
 		break;
 	    case SLJIT_SUBC:
 		c = a-b;
-		set_flags_subc32(&st->flags,
+		set_flags_subc32(&st->flags, setf,
 				 (sljit_u32) a, (sljit_u32) b, (sljit_u32) c);
 		break;
 	    case SLJIT_MUL:
-		c = a*b;
-		set_flags_mul32(&st->flags, a, b, c);
+		mul_s32(&st->flags, setf, a, b, &c);
 		break;
 	    case SLJIT_AND:
 		c = a&b;
-		set_flags_logic32(&st->flags, (sljit_u32) c);
+		set_flags_logic32(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_OR:
 		c = a|b;
-		set_flags_logic32(&st->flags, (sljit_u32) c);
+		set_flags_logic32(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_XOR:
 		c = a^b;		
-		set_flags_logic32(&st->flags, (sljit_u32) c);
+		set_flags_logic32(&st->flags, setf, (sljit_u32) c);
 		break;		
 	    case SLJIT_SHL:
 		c = a<<b;
-		set_flags_zero32(&st->flags, (sljit_u32) c);
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_MSHL:
 		c = a<<(b&SHIFTM);
-		set_flags_zero32(&st->flags, (sljit_u32) c);		
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);		
 		break;
 	    case SLJIT_LSHR:
 		c = ((sljit_u32)a)>>b;
-		set_flags_zero32(&st->flags, (sljit_u32) c);		
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);		
 		break;
 	    case SLJIT_MLSHR:
 		c = ((sljit_u32)a)>>(b&SHIFTM);
-		set_flags_zero32(&st->flags, (sljit_u32) c);		
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);		
 		break;
 	    case SLJIT_ASHR:
 		c = a>>b;
-		set_flags_zero32(&st->flags, (sljit_u32) c);
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_MASHR:
 		c = a>>(b&SHIFTM);
-		set_flags_zero32(&st->flags, (sljit_u32) c);
+		set_flags_zero32(&st->flags, setf, (sljit_u32) c);
 		break;	    
 	    case SLJIT_ROTL:
 		c = (a<<(b&SHIFTM)) | (a>>(SWSIZE-(b&SHIFTM)));
@@ -852,67 +1027,67 @@ next:
 	}
 	else {
 	    sljit_sw a, b, c;
-	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
+	    sljit_s32 setf = get_flags(prog[pc].op);	    
+	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);	    
 	    load_sw(&b, prog[pc].src2, prog[pc].src2w, st);
-	    fprintf(stderr, "op2: a=%ld, b=%ld\r\n", a, b);
-	    switch(prog[pc].op) {
+	    switch(GET_OPCODE(prog[pc].op)) {
 	    case SLJIT_ADD:
 		c = a+b;
-		set_flags_add(&st->flags, (sljit_uw) a, (sljit_uw) b, (sljit_uw) c);
-		fprintf(stderr, "op2: add c=%ld\r\n", c);
+		set_flags_add(&st->flags, setf, (sljit_uw) a, (sljit_uw) b,
+			      (sljit_uw) c);
 		break;
 	    case SLJIT_ADDC:
 		c = a+b;
-		set_flags_addc(&st->flags, (sljit_uw) a, (sljit_uw) b, (sljit_uw) c);		
+		set_flags_addc(&st->flags, setf, (sljit_uw) a, (sljit_uw) b, (sljit_uw) c);		
 		break;
 	    case SLJIT_SUB:
 		c = a-b;
-		fprintf(stderr, "op2: sub c=%ld\r\n", c);
-		set_flags_sub(&st->flags, (sljit_uw) a, (sljit_uw) b, (sljit_uw) c);
+		set_flags_sub(&st->flags, setf, (sljit_uw) a, (sljit_uw) b,
+			      (sljit_uw) c);
 		break;
 	    case SLJIT_SUBC:
 		c = a-b;
-		set_flags_subc(&st->flags, (sljit_uw) a, (sljit_uw) b, (sljit_uw) c);
+		set_flags_subc(&st->flags, setf, (sljit_uw) a, (sljit_uw) b,
+			       (sljit_uw) c);
 		break;
 	    case SLJIT_MUL:
-		c = a*b;
-		set_flags_mul(&st->flags, a, b, c);
+		mul_sw(&st->flags, setf, a, b, &c);
 		break;
 	    case SLJIT_AND:
 		c = a&b;
-		set_flags_logic(&st->flags, (sljit_u32) c);
+		set_flags_logic(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_OR:
 		c = a|b;
-		set_flags_logic(&st->flags, (sljit_u32) c);		
+		set_flags_logic(&st->flags, setf, (sljit_u32) c);		
 		break;
 	    case SLJIT_XOR:
 		c = a^b;		
-		set_flags_logic(&st->flags, (sljit_u32) c);
+		set_flags_logic(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_SHL:
 		c = a<<b;
-		set_flags_zero(&st->flags, (sljit_u32) c);
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_MSHL:
 		c = a<<(b&SHIFTM);
-		set_flags_zero(&st->flags, (sljit_u32) c);
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_LSHR:
 		c = ((sljit_u32)a)>>b;
-		set_flags_zero(&st->flags, (sljit_u32) c);		
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);		
 		break;
 	    case SLJIT_MLSHR:
 		c = ((sljit_u32)a)>>(b&SHIFTM);
-		set_flags_zero(&st->flags, (sljit_u32) c);
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_ASHR:
 		c = a>>b;
-		set_flags_zero(&st->flags, (sljit_u32) c);
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_MASHR:
 		c = a>>(b&SHIFTM);
-		set_flags_zero(&st->flags, (sljit_u32) c);
+		set_flags_zero(&st->flags, setf, (sljit_u32) c);
 		break;
 	    case SLJIT_ROTL:
 		c = (a<<(b&SHIFTM)) | (a>>(SWSIZE-(b&SHIFTM)));
@@ -930,12 +1105,12 @@ next:
 	break;
 	
     case FMT_OP2R: {
-	if (prog[pc].op & SLJIT_32) {
+	if (GET_OPCODE(prog[pc].op) & SLJIT_32) {
 	    sljit_s32 a, b, c;
 	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_s32(&b, prog[pc].src2, prog[pc].src2w, st);
 	    load_s32(&c, prog[pc].dst, 0, st);
-	    switch(prog[pc].op &  ~SLJIT_32) {
+	    switch(GET_OPCODE(prog[pc].op) & ~SLJIT_32) {
 	    case SLJIT_MULADD:
 		c = a*b + c;
 		break;
@@ -948,7 +1123,7 @@ next:
 	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_sw(&b, prog[pc].src2, prog[pc].src2w, st);
 	    load_sw(&c, prog[pc].dst, 0, st);
-	    switch(prog[pc].op) {
+	    switch(GET_OPCODE(prog[pc].op)) {
 	    case SLJIT_MULADD:
 		c = a*b + c;
 		break;
@@ -956,11 +1131,249 @@ next:
 	    }
 	    store_sw(c, prog[pc].dst & 0x7f, 0, st);	    
 	}
-
+	break;
+    }
+	
+    case FMT_FOP1: {
+	switch(GET_OPCODE(prog[pc].op)) {
+	case SLJIT_MOV_F64: {
+	    sljit_f64 a;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f64(a, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_MOV_F32: {
+	    sljit_f32 a;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f32(a, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_CONV_F64_FROM_F32: {
+	    sljit_f32 a;
+	    sljit_f64 b;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = a;
+	    store_f64(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_CONV_F32_FROM_F64: {
+	    sljit_f64 a;
+	    sljit_f32 b;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = a;
+	    store_f32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	
+	}
+	case SLJIT_CONV_SW_FROM_F64: {
+	    sljit_f64 a;
+	    sljit_sw  b;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_sw) trunc(a);
+	    store_sw(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_CONV_SW_FROM_F32: {
+	    sljit_f32 a;
+	    sljit_sw  b;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_sw) truncf(a);
+	    store_sw(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_CONV_S32_FROM_F64: {
+	    sljit_f64 a;
+	    sljit_s32  b;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_s32) trunc(a);
+	    store_s32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_CONV_S32_FROM_F32: {
+	    sljit_f32 a;
+	    sljit_s32  b;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_s32) truncf(a);
+	    store_s32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_CONV_F64_FROM_SW: {
+	    sljit_sw a;
+	    sljit_f64 b;
+	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f64) a;
+	    store_f64(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_CONV_F32_FROM_SW: {
+	    sljit_sw a;
+	    sljit_f32 b;
+	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f32) a;
+	    store_f32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_CONV_F64_FROM_S32: {
+	    sljit_s32 a;
+	    sljit_f64 b;
+	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f64) a;
+	    store_f64(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_CONV_F32_FROM_S32: {
+	    sljit_s32 a;
+	    sljit_f32 b;
+	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f32) a;
+	    store_f32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	case SLJIT_CONV_F64_FROM_UW: {
+	    sljit_uw a;
+	    sljit_f64 b;
+	    load_uw(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f64) a;
+	    store_f64(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_CONV_F32_FROM_UW: {
+	    sljit_uw a;
+	    sljit_f32 b;
+	    load_uw(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f32) a;
+	    store_f32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	case SLJIT_CONV_F64_FROM_U32: {
+	    sljit_u32 a;
+	    sljit_f64 b;
+	    load_u32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f64) a;
+	    store_f64(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	case SLJIT_CONV_F32_FROM_U32: {
+	    sljit_u32 a;
+	    sljit_f32 b;
+	    load_u32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    b = (sljit_f32) a;
+	    store_f32(b, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    	    
+	}
+	case SLJIT_CMP_F64: {
+	    sljit_f64 a, b;
+	    load_f64(&a, prog[pc].dst, prog[pc].dstw, st);
+	    load_f64(&b, prog[pc].src1, prog[pc].src1w, st);
+	    cmp_f64(&st->flags, a, b);
+	    break;
+	}
+	case SLJIT_CMP_F32: {
+	    sljit_f32 a, b;
+	    load_f32(&a, prog[pc].dst, prog[pc].dstw, st);
+	    load_f32(&b, prog[pc].src1, prog[pc].src1w, st);
+	    cmp_f32(&st->flags, a, b);
+	    break;
+	}
+	case SLJIT_NEG_F64: {
+	    sljit_f64 a;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f64(-a, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_NEG_F32: {
+	    sljit_f32 a;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f32(-a, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_ABS_F64: {
+	    sljit_f64 a;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f64(fabs(a), prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_ABS_F32: {
+	    sljit_f32 a;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    store_f32(fabsf(a), prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	default: break;
+	}
+	break;
+    }
+    case FMT_FOP2: {
+	switch(GET_OPCODE(prog[pc].op)) {
+	case SLJIT_ADD_F64: {
+	    sljit_f64 a, b, c;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a+b;
+	    store_f64(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;
+	}
+	case SLJIT_ADD_F32: {
+	    sljit_f32 a, b, c;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f32(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a+b;
+	    store_f32(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_SUB_F64: {
+	    sljit_f64 a, b, c;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a-b;
+	    store_f64(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_SUB_F32: {
+	    sljit_f32 a, b, c;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f32(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a-b;
+	    store_f32(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	case SLJIT_MUL_F64: {
+	    sljit_f64 a, b, c;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a*b;
+	    store_f64(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_MUL_F32: {
+	    sljit_f32 a, b, c;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f32(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a*b;
+	    store_f32(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	case SLJIT_DIV_F64: {
+	    sljit_f64 a, b, c;
+	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a/b;
+	    store_f64(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    
+	}
+	case SLJIT_DIV_F32: {
+	    sljit_f32 a, b, c;
+	    load_f32(&a, prog[pc].src1, prog[pc].src1w, st);
+	    load_f32(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    c = a/b;
+	    store_f32(c, prog[pc].dst, prog[pc].dstw, st);
+	    break;	    	    
+	}
+	default: break;
+	}
 	break;
     }
     case FMT_CONST: {
-	switch(prog[pc].op) {
+	switch(GET_OPCODE(prog[pc].op)) {
 	case SLJIT_MOV:
 	    store_sw(prog[pc].sw_val, prog[pc].dst, prog[pc].dstw, st);
 	    break;
@@ -975,7 +1388,6 @@ next:
 	}	    
 	break;
     }
-	
     case FMT_RETURN_VOID:
 	dump_state(st);		
 	return;
