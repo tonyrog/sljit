@@ -6,6 +6,11 @@
 #include <byteswap.h>
 #include <math.h>
 
+//#define DEBUG_ACCESS
+//#define DEBUG_FRAME
+//#define DEBUG_TRACE
+//#define DEBUG_STATE
+
 #ifdef DEBUG_ACCESS
 #define DBG_ACCESS(fmt,args...) \
     fprintf(stderr, fmt "\r\n", args)
@@ -84,6 +89,218 @@ typedef enum {
     FMT_ATOMIC_STORE = 47,
     FMT_RETURN_TO = 48,
 } sljitter_fmt_t;
+
+#ifdef DEBUG_TRACE
+const char* fmt_name[] =
+{
+    [FMT_OP0] = "op0",
+    [FMT_OP1] = "op1",
+    [FMT_OP2] = "op2",
+    [FMT_OP2U] = "op2u",
+    [FMT_OP2R] = "op2r",
+    [FMT_SHIFT_INTO] = "shift_into",
+    [FMT_OP_SRC] = "op_src",
+    [FMT_OP_DST] = "op_dst",
+    [FMT_FOP1] = "fop1",
+    [FMT_FOP2] = "fop2",
+    [FMT_FOP2R] = "fop2r",
+    [FMT_FSET32] = "fset32",
+    [FMT_FSET64] = "fset64",
+    [FMT_FCOPY] = "fcopy",
+    [FMT_LABEL] = "label",
+    [FMT_JUMP] = "jump",
+    [FMT_CALL] = "call",
+    [FMT_CMP] = "cmp",
+    [FMT_FCMP] = "fcmp",
+    [FMT_IJUMP] = "ijump",
+    [FMT_ICALL] = "icall",
+    [FMT_ENTER] = "enter",
+    [FMT_SET_CONTEXT] = "set_context",
+    [FMT_RETURN] = "return",
+    [FMT_RETURN_VOID] = "return_void",
+    [FMT_SIMD_OP2] = "simd_op2",
+    [FMT_MCALL] = "mcall",
+    [FMT_MJUMP] = "mjump",
+    [FMT_CONST] = "const",
+    [FMT_OP_ADDR] = "op_addr",
+    [FMT_OP2CMPZ] = "op2cmpz",
+    [FMT_OP_FLAGS] = "op_flags",
+    [FMT_SELECT] = "select",
+    [FMT_FSELECT] = "fselect",
+    [FMT_MEM] = "mem",
+    [FMT_MEM_UPDATE] = "mem_update",
+    [FMT_FMEM] = "fmem",
+    [FMT_FMEM_UPDATE] = "fmem_update",
+    [FMT_SIMD_MOV] = "simd_mov",
+    [FMT_SIMD_REPLICATE] = "simd_replicate",
+    [FMT_SIMD_LANE_MOV] = "simd_lane_mov",
+    [FMT_SIMD_LANE_REPLICATE] = "simd_lane_replicate",
+    [FMT_SIMD_EXTEND] = "simd_extend",
+    [FMT_SIMD_SIGN] = "simd_sign",
+    [FMT_ATOMIC_LOAD] = "atomic_load",
+    [FMT_ATOMIC_STORE] = "atomic_store",
+    [FMT_RETURN_TO] = "return_to"
+};
+
+const char* op_name0[256] =
+{
+    [SLJIT_BREAKPOINT] = "breakpoint",
+    [SLJIT_NOP]        = "nop",
+    [SLJIT_LMUL_UW]    = "lmul_uw",
+    [SLJIT_LMUL_SW]    = "lmul_sw",
+    [SLJIT_DIVMOD_UW]  = "divmod_uw",
+    [SLJIT_DIVMOD_SW]  = "divmod_sw",
+    [SLJIT_DIV_UW]     = "div_uw",
+    [SLJIT_DIV_SW]     = "div_sw",
+    [SLJIT_MEMORY_BARRIER] = "memory_barrier",
+    [SLJIT_ENDBR] = "endbr",
+    [SLJIT_SKIP_FRAMES_BEFORE_RETURN] = "skip_frames_before_return",
+    [SLJIT_MOV] = "mov",
+    [SLJIT_MOV_U8] = "mov_u8",
+    [SLJIT_MOV_S8] = "mov_s8",
+    [SLJIT_MOV_U16] = "mov_u16",
+    [SLJIT_MOV_S16] = "mov_s16",
+    [SLJIT_MOV_U32] = "mov_u32",
+    [SLJIT_MOV_S32] = "mov_s32",
+    [SLJIT_MOV_P] = "mov_p",
+    [SLJIT_CLZ] = "clz",
+    [SLJIT_CTZ] = "ctz",
+    [SLJIT_REV] = "rev",
+    [SLJIT_REV_U16] = "rev_u16",
+    [SLJIT_REV_S16] = "rev_s16",
+    [SLJIT_REV_U32] = "rev_u32",
+    [SLJIT_REV_S32] = "rev_s32",
+    [SLJIT_ADD] = "add",
+    [SLJIT_ADDC] = "addc",
+    [SLJIT_SUB] = "sub",
+    [SLJIT_SUBC] = "subc",
+    [SLJIT_MUL] = "mul",
+    [SLJIT_AND] = "and",
+    [SLJIT_OR] = "or",
+    [SLJIT_XOR] = "xor",
+    [SLJIT_SHL] = "shl",
+    [SLJIT_MSHL] = "mshl",
+    [SLJIT_LSHR] = "lshr",
+    [SLJIT_MLSHR] = "mlshr",
+    [SLJIT_ASHR] = "ashr",
+    [SLJIT_MASHR] = "mashr",
+    [SLJIT_ROTL] = "rotl",
+    [SLJIT_ROTR] = "rotr",
+    [SLJIT_MULADD] = "muladd",
+    [SLJIT_FAST_RETURN] = "fast_return",
+    [SLJIT_SKIP_FRAMES_BEFORE_FAST_RETURN] = "skip_frames_before_fast_return",
+    [SLJIT_PREFETCH_L1] = "prefetch_l1",
+    [SLJIT_PREFETCH_L2] = "prefetch_l2",
+    [SLJIT_PREFETCH_L3] = "prefetch_l3",
+    [SLJIT_PREFETCH_ONCE] = "prefetch_once",
+    [SLJIT_FAST_ENTER] = "fast_enter",
+    [SLJIT_GET_RETURN_ADDRESS] = "get_return_address",
+    [SLJIT_MOV_F64] = "mov_f64",
+    [SLJIT_CONV_F64_FROM_F32] = "conv_f64_from_f32",
+    [SLJIT_CONV_SW_FROM_F64] = "conv_sw_from_f64",
+    [SLJIT_CONV_S32_FROM_F64] = "conv_s32_from_f64",
+    [SLJIT_CONV_F64_FROM_SW] = "conv_f64_from_sw",
+    [SLJIT_CONV_F64_FROM_S32] = "conv_f64_from_s32",
+    [SLJIT_CONV_F64_FROM_UW] = "conv_f64_from_uw",
+    [SLJIT_CONV_F64_FROM_U32] = "conv_f64_from_u32",
+    [SLJIT_CMP_F64] = "cmp_f64",
+    [SLJIT_NEG_F64] = "neg_f64",
+    [SLJIT_ABS_F64] = "abs_f64",
+    [SLJIT_ADD_F64] = "add_f64",
+    [SLJIT_SUB_F64] = "sub_f64",
+    [SLJIT_MUL_F64] = "mul_f64",
+    [SLJIT_DIV_F64] = "div_f64",
+    [SLJIT_COPYSIGN_F64] = "copysign_f64",
+};
+
+const char* fcopy_name0[] =
+{
+    [SLJIT_COPY_TO_F64]     = "copy_to_f64",
+    [SLJIT_COPY_FROM_F64]   = "copy_from_f64",
+};
+
+const char* jump_type0[] =
+{
+    [SLJIT_EQUAL] = "equal",
+    [SLJIT_NOT_EQUAL] = "not_equal",
+    [SLJIT_LESS] = "less",
+    [SLJIT_GREATER_EQUAL] = "greater_equal",
+    [SLJIT_GREATER] = "greater",
+    [SLJIT_LESS_EQUAL] = "less_equal",
+    [SLJIT_SIG_LESS] = "sig_less",
+    [SLJIT_SIG_GREATER_EQUAL] = "sig_greater_equal",
+    [SLJIT_SIG_GREATER] = "sig_greater",
+    [SLJIT_SIG_LESS_EQUAL] = "sig_less_equal",
+    [SLJIT_OVERFLOW] = "overflow",
+    [SLJIT_NOT_OVERFLOW] = "not_overflow",
+    [SLJIT_CARRY] = "carry",
+    [SLJIT_NOT_CARRY] = "not_carry",
+    [SLJIT_ATOMIC_STORED] = "atomic_stored",
+    [SLJIT_ATOMIC_NOT_STORED] = "atomic_not_stored",
+    // fixme: add float compare
+    [SLJIT_JUMP] = "always",
+    [SLJIT_FAST_CALL] = "fast_call",
+    [SLJIT_CALL] = "call",
+    [SLJIT_CALL_REG_ARG] = "call_reg_arg",        
+};
+
+const char* jump_type(sljit_s32 type)
+{
+    if ((type<0) || (type > 39))
+	return "unknown";
+    if (jump_type0[type] == NULL)
+	return "unknown";
+    return jump_type0[type];
+}
+
+// FIXME: translate xyz_uw => xyz_u32
+//                  xyz_sw => xyz_s32
+// when SLJIT_32 is set
+static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
+{
+    static char name_buf[40];
+    const char* nptr;
+
+    switch(fmt) {
+    case FMT_RETURN: break;
+    case FMT_OP0: break;
+    case FMT_OP1: break;
+    case FMT_OP2: break;
+    case FMT_OP2U: break;
+    case FMT_OP2R: break;
+    case FMT_SHIFT_INTO: break;
+    case FMT_OP_SRC: break;
+    case FMT_OP_DST: break;
+    case FMT_FOP1: break;
+    case FMT_FOP2: break;
+    case FMT_FOP2R: break;
+    case FMT_FCOPY: break;
+    case FMT_OP2CMPZ: break;
+    case FMT_OP_FLAGS: break;
+    case FMT_ATOMIC_LOAD: break;
+    case FMT_ATOMIC_STORE: break;
+    case FMT_CONST: break;
+    case FMT_OP_ADDR: break;
+    case FMT_JUMP:
+	strcpy(name_buf, "jump");
+	strcat(name_buf, ".");
+	strcat(name_buf, jump_type(type));
+	return name_buf;
+    default:
+	return ""; // no known op code
+    }
+    if ((nptr = op_name0[op & 0xff]) == NULL)
+	return "unknown";
+    if (op & SLJIT_32) {
+	strcpy(name_buf, nptr);
+	strcat(name_buf, ".32");
+	return name_buf;
+    }
+    return (char*) nptr;
+}
+
+#endif
+
 
 // 64 bytes?
 typedef struct {
@@ -416,11 +633,21 @@ static int pop_f32(emulator_state_t* st, sljit_f32* data)
 // extract flags from operation
 static inline sljit_s32 get_flags(sljit_s32 op)
 {
-    cpu_flags_t f = 0;    
+    cpu_flags_t f = 0;
     f = (op & SLJIT_SET_Z) ? FLAG_Z : 0;
-    f |= (GET_FLAG_TYPE(op) == GET_FLAG_TYPE(SLJIT_SET_CARRY)) ? FLAG_C : 0;
-    f |= (GET_FLAG_TYPE(op) == SLJIT_OVERFLOW) ? FLAG_V : 0;
-    // more flags to generate...
+    switch(GET_FLAG_TYPE(op)) {
+    case SLJIT_CARRY:         f |= FLAG_C; break;
+    case SLJIT_OVERFLOW:      f |= FLAG_V; break;	
+    case SLJIT_LESS:          f |= FLAG_C; break;
+    case SLJIT_GREATER_EQUAL: f |= FLAG_C; break;
+    case SLJIT_GREATER:       f |= FLAG_C|FLAG_Z; break;
+    case SLJIT_LESS_EQUAL:    f |= FLAG_C|FLAG_Z; break;
+    case SLJIT_SIG_LESS:      f |= FLAG_N|FLAG_V; break;
+    case SLJIT_SIG_GREATER_EQUAL: f |= FLAG_N|FLAG_V; break;
+    case SLJIT_SIG_GREATER: f |= FLAG_Z|FLAG_N|FLAG_V; break;
+    case SLJIT_SIG_LESS_EQUAL: f |= FLAG_Z|FLAG_N|FLAG_V; break;
+    default: break;
+    }
     return f;
 }
 
@@ -870,8 +1097,9 @@ next:
 	DUMP_STATE(st, pc);	
 	return;
     }
-    DBG_TRACE("emu: pc=%ld, fmt=%d, op=%d",
-	      pc, prog[pc].fmt, prog[pc].op);
+    DBG_TRACE("emu: pc=%ld, fmt=%s, op=%s",
+	      pc, fmt_name[prog[pc].fmt],
+	      op_name(prog[pc].fmt, prog[pc].op, prog[pc].type));
     
     switch(prog[pc].fmt) {
     case FMT_ENTER: {
