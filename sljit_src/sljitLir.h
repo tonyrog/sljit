@@ -2631,7 +2631,7 @@ typedef union {
     sljit_sw  sw;
     sljit_uw  uw;
     sljit_s32 s32;
-    sljit_s16 s16;    
+    sljit_s16 s16;
     sljit_s8  s8;
     sljit_u32 u32;
     sljit_u16 u16;
@@ -2648,20 +2648,15 @@ typedef sljit_uw cpu_flags_t;
 
 typedef struct {
     cpu_flags_t flags;
-    reg_t      r[SLJIT_NUMBER_OF_EMU_REGISTERS];          // SLJIT_R(i)
-    freg_t    fr[SLJIT_NUMBER_OF_EMU_FLOAT_REGISTERS];    // SLJIT_FR(i)
-    vec_t     vr[SLJIT_NUMBER_OF_EMU_VECTOR_REGISTERS];   // SLKIT_VR(i)
-    size_t    mem_size;                               // in bytes
-    sljit_u8* mem_base;                               // word aligned memory
+    reg_t      r[SLJIT_NUMBER_OF_EMU_REGISTERS+1];      // SLJIT_R0..R15,SP
+    freg_t    fr[SLJIT_NUMBER_OF_EMU_FLOAT_REGISTERS];  // SLJIT_FR(i)
+    vec_t     vr[SLJIT_NUMBER_OF_EMU_VECTOR_REGISTERS]; // SLKIT_VR(i)
+    size_t    ram_size;                                 // in bytes
+    size_t    rom_size;                                 // in bytes
+    size_t    stack_size;                               // total size    
+    sljit_u8* mem_base;                                 // word aligned memory
+    sljit_sw  call;                                     // current call
 } emulator_state_t;
-
- 
-SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_run(emulator_state_t* state,
-					     void* code, size_t code_size,
-					     void* addr,
-					     void* args,
-					     sljit_s32 arg_types,
-					     void* ret);
 
 /* --------------------------------------------------------------------- */
 /*  Miscellaneous utility functions                                      */

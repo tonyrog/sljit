@@ -2,7 +2,7 @@
 
 int CAT2(load_mem_,TP)(TYPE* ptr, sljit_sw addr, emulator_state_t* st)
 {
-    if ((addr < 0) || (addr > (sljit_sw)(st->mem_size-sizeof(TYPE))))
+    if ((addr < 0) || (addr > (sljit_sw)(st->ram_size-sizeof(TYPE))))
 	return -1;
     *ptr = *((TYPE*) (st->mem_base+addr));
     return 0;
@@ -31,7 +31,7 @@ int CAT2(load_,TP)(TYPE* ptr, sljit_s32 src, sljit_sw srcw, emulator_state_t* st
 
 int CAT2(store_mem_,TP)(TYPE val, sljit_sw addr, emulator_state_t* st)
 {
-    if ((addr < 0) || (addr > (sljit_sw)(st->mem_size-sizeof(TYPE))))    
+    if ((addr < 0) || (addr > (sljit_sw)(st->ram_size-sizeof(TYPE))))    
 	return -1;
     *((TYPE*) (st->mem_base+addr)) = val;
     return 0;
