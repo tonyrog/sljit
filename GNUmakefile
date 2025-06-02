@@ -25,6 +25,10 @@ ifndef WERROR
 WERROR = -Werror
 endif
 
+ifdef SLJIT_CONFIG_EMULATOR
+EXTRA_LDFLAGS += -lffcall
+endif
+
 CPPFLAGS = $(EXTRA_CPPFLAGS) -Isljit_src
 CFLAGS += $(COMPAT_FLAGS) $(OPT_FLAGS) $(WARN_FLAGS) $(WERROR)
 REGEX_CFLAGS += $(CFLAGS) -fshort-wchar
@@ -40,7 +44,8 @@ EXAMPLEDIR = docs/tutorial/sources
 TARGET = $(BINDIR)/sljit_test $(BINDIR)/regex_test
 EXAMPLE_TARGET = $(BINDIR)/func_call $(BINDIR)/first_program $(BINDIR)/branch $(BINDIR)/loop $(BINDIR)/array_access $(BINDIR)/func_call $(BINDIR)/struct_access $(BINDIR)/temp_var $(BINDIR)/brainfuck
 
-SLJIT_HEADERS = $(SRCDIR)/sljitLir.h $(SRCDIR)/sljitConfig.h $(SRCDIR)/sljitConfigInternal.h
+SLJIT_HEADERS = $(SRCDIR)/sljitLir.h $(SRCDIR)/sljitConfig.h $(SRCDIR)/sljitConfigInternal.h \
+	$(SRCDIR)/sljitEmulator.i $(SRCDIR)/sljitEmulatorfxx.i
 
 SLJIT_LIR_FILES = $(SRCDIR)/sljitLir.c $(SRCDIR)/sljitUtils.c \
 	$(SRCDIR)/allocator_src/sljitExecAllocatorCore.c $(SRCDIR)/allocator_src/sljitExecAllocatorApple.c \
@@ -52,7 +57,8 @@ SLJIT_LIR_FILES = $(SRCDIR)/sljitLir.c $(SRCDIR)/sljitUtils.c \
 	$(SRCDIR)/sljitNativePPC_common.c $(SRCDIR)/sljitNativePPC_32.c $(SRCDIR)/sljitNativePPC_64.c \
 	$(SRCDIR)/sljitNativeRISCV_common.c $(SRCDIR)/sljitNativeRISCV_32.c $(SRCDIR)/sljitNativeRISCV_64.c \
 	$(SRCDIR)/sljitNativeS390X.c $(SRCDIR)/sljitNativeLOONGARCH_64.c \
-	$(SRCDIR)/sljitNativeX86_common.c $(SRCDIR)/sljitNativeX86_32.c $(SRCDIR)/sljitNativeX86_64.c
+	$(SRCDIR)/sljitNativeX86_common.c $(SRCDIR)/sljitNativeX86_32.c $(SRCDIR)/sljitNativeX86_64.c \
+	$(SRCDIR)/sljitEmulator.c
 
 .PHONY: all clean examples
 
@@ -76,6 +82,8 @@ $(BINDIR)/regexMain.o : $(REGEXDIR)/regexMain.c $(BINDIR)/.keep $(SLJIT_HEADERS)
 
 $(BINDIR)/regexJIT.o : $(REGEXDIR)/regexJIT.c $(BINDIR)/.keep $(SLJIT_HEADERS) $(REGEXDIR)/regexJIT.h
 	$(CC) $(CPPFLAGS) $(REGEX_CFLAGS) -c -o $@ $(REGEXDIR)/regexJIT.c
+
+
 
 $(BINDIR)/sljit_test: $(BINDIR)/.keep $(BINDIR)/sljitMain.o $(TESTDIR)/sljitTest.c $(SRCDIR)/sljitLir.c $(SLJIT_LIR_FILES) $(SLJIT_HEADERS) $(TESTDIR)/sljitConfigPre.h $(TESTDIR)/sljitConfigPost.h $(TESTDIR)/sljitTestBuffers.h $(TESTDIR)/sljitTestCall.h $(TESTDIR)/sljitTestFloat.h $(TESTDIR)/sljitTestSimd.h
 	$(CC) $(CPPFLAGS) -DSLJIT_HAVE_CONFIG_PRE=1 -I$(TESTDIR) $(CFLAGS) $(LDFLAGS) $(BINDIR)/sljitMain.o $(TESTDIR)/sljitTest.c $(SRCDIR)/sljitLir.c -o $@ -lm -lpthread $(EXTRA_LIBS)

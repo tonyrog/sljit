@@ -31,6 +31,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+
+#if defined(SLJIT_CONFIG_EMULATOR) && SLJIT_CONFIG_EMULATOR==1
+#include <avcall.h>
+#endif
+
+
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4127) /* conditional expression is constant */

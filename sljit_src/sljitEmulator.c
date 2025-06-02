@@ -6,10 +6,10 @@
 #include <byteswap.h>
 #include <math.h>
 
-//#define DEBUG_ACCESS
-//#define DEBUG_FRAME
-//#define DEBUG_TRACE
-//#define DEBUG_STATE
+// #define DEBUG_ACCESS
+// #define DEBUG_FRAME
+// #define DEBUG_TRACE
+// #define DEBUG_STATE
 
 #ifdef DEBUG_ACCESS
 #define DBG_ACCESS(fmt,args...) \
@@ -646,6 +646,13 @@ static inline sljit_s32 get_flags(sljit_s32 op)
     case SLJIT_SIG_GREATER_EQUAL: f |= FLAG_N|FLAG_V; break;
     case SLJIT_SIG_GREATER: f |= FLAG_Z|FLAG_N|FLAG_V; break;
     case SLJIT_SIG_LESS_EQUAL: f |= FLAG_Z|FLAG_N|FLAG_V; break;
+
+    case SLJIT_F_EQUAL:         f |= FLAG_E; break;
+    case SLJIT_F_NOT_EQUAL:     f |= FLAG_E; break;
+    case SLJIT_F_LESS:          f |= FLAG_L; break;
+    case SLJIT_F_LESS_EQUAL:    f |= (FLAG_L|FLAG_E); break;
+    case SLJIT_F_GREATER:       f |= FLAG_G; break;	
+    case SLJIT_F_GREATER_EQUAL: f |= (FLAG_G|FLAG_E); break;
     default: break;
     }
     return f;
@@ -690,12 +697,11 @@ static inline void set_flags_sub(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, s
 }
 
 
-// ???? FIXME ZERO?
 static inline void set_flags_logic(cpu_flags_t* fp, cpu_flags_t set, sljit_uw c)
 {
     cpu_flags_t f = 0;
-    if ((set & FLAG_C) && (c == 0)) f |= FLAG_C;
-    *fp = (*fp & ~(FLAG_C)) | f;
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    *fp = (*fp & ~(FLAG_Z)) | f;
 }
 
 static inline void set_flags_zero(cpu_flags_t* fp, cpu_flags_t set, sljit_uw c)
@@ -746,8 +752,8 @@ static inline void set_flags_sub32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 a
 static inline void set_flags_logic32(cpu_flags_t* fp, cpu_flags_t set, sljit_u32 c)
 {
     cpu_flags_t f = 0;
-    if ((set & FLAG_C) && (c == 0)) f |= FLAG_C;
-    *fp = (*fp & ~(FLAG_C)) | f;    
+    if ((set & FLAG_Z) && (c == 0)) f |= FLAG_Z;
+    *fp = (*fp & ~(FLAG_Z)) | f;    
 }
 
 static inline void set_flags_zero32(cpu_flags_t*fp, cpu_flags_t set, sljit_u32 c)
@@ -770,23 +776,23 @@ static inline void set_flags_mul(cpu_flags_t* fp, cpu_flags_t set, sljit_sw a, s
 #endif
 
 // EQUAL_F | LESS_F | GREATER_EQUAL_F | GREATER_F | LESS_EQUAL_F
-static void cmp_f32(cpu_flags_t* fp, sljit_f32 a, sljit_f32 b)
+static void cmp_f32(cpu_flags_t* fp, cpu_flags_t set, sljit_f32 a, sljit_f32 b)
 {
     cpu_flags_t f = 0;
 
-    if (a < b)   f |= FLAG_L;
-    if (a > b)   f |= FLAG_G;
-    if (a == b)  f |= FLAG_E;
+    if ((set & FLAG_L) && (a < b))   f |= FLAG_L;
+    if ((set & FLAG_G) && (a > b))   f |= FLAG_G;
+    if ((set & FLAG_E) && (a == b))  f |= FLAG_E;    
     *fp = (*fp & ~(FLAGS_LGE)) | f;
 }
 
-static void cmp_f64(cpu_flags_t* fp, sljit_f64 a, sljit_f64 b)
+static void cmp_f64(cpu_flags_t* fp, cpu_flags_t set, sljit_f64 a, sljit_f64 b)
 {
     cpu_flags_t f = 0;
-
-    if (a < b)   f |= FLAG_L;
-    if (a > b)   f |= FLAG_G;
-    if (a == b)  f |= FLAG_E;
+    
+    if ((set & FLAG_L) && (a < b))   f |= FLAG_L;
+    if ((set & FLAG_G) && (a > b))   f |= FLAG_G;
+    if ((set & FLAG_E) && (a == b))  f |= FLAG_E;
     *fp = (*fp & ~(FLAGS_LGE)) | f;
 }
 
@@ -1185,7 +1191,6 @@ next:
 	case SLJIT_SIG_LESS_EQUAL:
 	    r = (FLAGS_ALL(st,FLAG_N) != FLAGS_ALL(st,FLAG_V)) ||
 		FLAGS_ALL(st,FLAG_Z); break;
-	    
 	case SLJIT_OVERFLOW:     r = FLAGS_ALL(st,FLAG_V); break;
 	case SLJIT_NOT_OVERFLOW: r = FLAGS_NONE(st,FLAG_V); break;
 	case SLJIT_CARRY:        r = FLAGS_ALL(st,FLAG_C); break;
@@ -1579,7 +1584,7 @@ next:
     case FMT_OP2:
 	if (GET_OPCODE(prog[pc].op) & SLJIT_32) {
 	    sljit_s32 a, b, c;
-	    sljit_s32 setf = get_flags(prog[pc].op);
+	    cpu_flags_t setf = get_flags(prog[pc].op);
 	    load_s32(&a, prog[pc].src1, prog[pc].src1w, st);
 	    load_s32(&b, prog[pc].src2, prog[pc].src2w, st);
 	    switch(GET_OPCODE(prog[pc].op) & ~SLJIT_32) {
@@ -1655,7 +1660,7 @@ next:
 	}
 	else {
 	    sljit_sw a, b, c;
-	    sljit_s32 setf = get_flags(prog[pc].op);	    
+	    cpu_flags_t setf = get_flags(prog[pc].op);
 	    load_sw(&a, prog[pc].src1, prog[pc].src1w, st);	    
 	    load_sw(&b, prog[pc].src2, prog[pc].src2w, st);
 	    switch(GET_OPCODE(prog[pc].op)) {
@@ -1725,7 +1730,7 @@ next:
 		c = (a>>(b&SHIFTM)) | (a<<(SWSIZE-(b&SHIFTM)));
 		// randomize flags option?
 		break;
-	    default: goto ignore;		
+	    default: goto ignore;
 	    }
 	    if (prog[pc].dst != 0) // check for OP2U
 		store_sw(c, prog[pc].dst, prog[pc].dstw, st);
@@ -1948,16 +1953,18 @@ next:
 	}
 	case SLJIT_CMP_F64: {
 	    sljit_f64 a, b;
+	    cpu_flags_t setf = get_flags(prog[pc].op);
 	    load_f64(&a, prog[pc].dst, prog[pc].dstw, st);
 	    load_f64(&b, prog[pc].src1, prog[pc].src1w, st);
-	    cmp_f64(&st->flags, a, b);
+	    cmp_f64(&st->flags, setf, a, b);
 	    break;
 	}
 	case SLJIT_CMP_F32: {
 	    sljit_f32 a, b;
+	    cpu_flags_t setf = get_flags(prog[pc].op);	    
 	    load_f32(&a, prog[pc].dst, prog[pc].dstw, st);
 	    load_f32(&b, prog[pc].src1, prog[pc].src1w, st);
-	    cmp_f32(&st->flags, a, b);
+	    cmp_f32(&st->flags, setf, a, b);
 	    break;
 	}
 	case SLJIT_NEG_F64: {
