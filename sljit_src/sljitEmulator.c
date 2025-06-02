@@ -231,6 +231,13 @@ const char* jump_type0[] =
     [SLJIT_SIG_GREATER_EQUAL] = "sig_greater_equal",
     [SLJIT_SIG_GREATER] = "sig_greater",
     [SLJIT_SIG_LESS_EQUAL] = "sig_less_equal",
+    [SLJIT_F_EQUAL] = "f_equal",
+    [SLJIT_F_NOT_EQUAL] = "f_not_equal",
+    [SLJIT_F_LESS] = "f_less",
+    [SLJIT_F_LESS_EQUAL] = "f_less_equal",
+    [SLJIT_F_GREATER] = "f_greater",
+    [SLJIT_F_GREATER_EQUAL] = "f_greater_equal",
+    
     [SLJIT_OVERFLOW] = "overflow",
     [SLJIT_NOT_OVERFLOW] = "not_overflow",
     [SLJIT_CARRY] = "carry",
@@ -258,9 +265,10 @@ const char* jump_type(sljit_s32 type)
 // when SLJIT_32 is set
 static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
 {
-    static char name_buf[40];
+    static char name_buf[80];
     const char* nptr;
-
+    sljit_s32 set;
+    
     switch(fmt) {
     case FMT_RETURN: break;
     case FMT_OP0: break;
@@ -291,12 +299,19 @@ static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
     }
     if ((nptr = op_name0[op & 0xff]) == NULL)
 	return "unknown";
-    if (op & SLJIT_32) {
-	strcpy(name_buf, nptr);
+    strcpy(name_buf, nptr);
+    if (op & SLJIT_32)
 	strcat(name_buf, ".32");
-	return name_buf;
+    if (op & SLJIT_SET_Z)
+	strcat(name_buf, ".z");
+    set = (op >> 10);
+    if ((set > 1) && (set < SLJIT_JUMP)) {
+	if (jump_type0[set] != NULL) {
+	    strcat(name_buf, ".");
+	    strcat(name_buf, jump_type0[set]);
+	}
     }
-    return (char*) nptr;
+    return (char*) name_buf;
 }
 
 #endif
@@ -649,9 +664,9 @@ static inline sljit_s32 get_flags(sljit_s32 op)
 
     case SLJIT_F_EQUAL:         f |= FLAG_E; break;
     case SLJIT_F_NOT_EQUAL:     f |= FLAG_E; break;
-    case SLJIT_F_LESS:          f |= FLAG_L; break;
+    case SLJIT_F_GREATER:       f |= (FLAG_L|FLAG_E); break;	
     case SLJIT_F_LESS_EQUAL:    f |= (FLAG_L|FLAG_E); break;
-    case SLJIT_F_GREATER:       f |= FLAG_G; break;	
+    case SLJIT_F_LESS:          f |= (FLAG_G|FLAG_E); break;	
     case SLJIT_F_GREATER_EQUAL: f |= (FLAG_G|FLAG_E); break;
     default: break;
     }
@@ -789,10 +804,12 @@ static void cmp_f32(cpu_flags_t* fp, cpu_flags_t set, sljit_f32 a, sljit_f32 b)
 static void cmp_f64(cpu_flags_t* fp, cpu_flags_t set, sljit_f64 a, sljit_f64 b)
 {
     cpu_flags_t f = 0;
-    
+
     if ((set & FLAG_L) && (a < b))   f |= FLAG_L;
     if ((set & FLAG_G) && (a > b))   f |= FLAG_G;
     if ((set & FLAG_E) && (a == b))  f |= FLAG_E;
+
+    DBG_TRACE("cmp_f64: set=%02lx, a=%f, b=%f, f=%02lx", set, a, b, f);
     *fp = (*fp & ~(FLAGS_LGE)) | f;
 }
 
@@ -1200,22 +1217,22 @@ next:
 	case SLJIT_ATOMIC_NOT_STORED:  break;
 	    // floatint point
 	case SLJIT_F_EQUAL:
-	    r = FLAGS_ALL(st,FLAG_E) && FLAGS_NONE(st,FLAG_L|FLAG_G);
+	    r = FLAGS_ALL(st,FLAG_E);
 	    break;
 	case SLJIT_F_NOT_EQUAL:
-	    r = FLAGS_NONE(st,FLAG_E) && FLAGS_ANY(st,FLAG_L|FLAG_G);
+	    r = FLAGS_NONE(st,FLAG_E);
 	    break;
 	case SLJIT_F_LESS:
-	    r = FLAGS_NONE(st,FLAG_E|FLAG_G) && FLAGS_ALL(st,FLAG_L);
+	    r = FLAGS_NONE(st,FLAG_G|FLAG_E);
 	    break;
 	case SLJIT_F_GREATER_EQUAL:
-	    r = FLAGS_NONE(st,FLAG_L) && FLAGS_ANY(st,FLAG_G|FLAG_E);
+	    r = FLAGS_ANY(st,FLAG_G|FLAG_E);
 	    break;	    
 	case SLJIT_F_GREATER:
-	    r = FLAGS_NONE(st,FLAG_L|FLAG_E) && FLAGS_ALL(st,FLAG_G);
+	    r = FLAGS_NONE(st,FLAG_L|FLAG_E);
 	    break;
 	case SLJIT_F_LESS_EQUAL:
-	    r = FLAGS_ANY(st,FLAG_L|FLAG_E) && FLAGS_NONE(st,FLAG_G);
+	    r = FLAGS_ANY(st,FLAG_L|FLAG_E);
 	    break;
 	case SLJIT_UNORDERED: break;
 	case SLJIT_ORDERED: break;
@@ -1237,6 +1254,7 @@ next:
 	case SLJIT_JUMP: r = 1; break;
 	default: goto ignore;
 	}
+	DBG_TRACE("jump r=%d", r);
 	if (r) {
 	    pc = prog[pc].target;
 	    goto next;
@@ -2504,7 +2522,7 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_return_void(struct sljit_compiler 
     ip = new_inst(compiler, FMT_RETURN_VOID, 0, 0);
     set_context(ip, compiler->options, 0,
 		scratches, saveds, 0);
-    DBG_TRACE("emit_return_void scratches%x, saveds=%x",
+    DBG_TRACE("emit_return_void scratches=%x, saveds=%x",
 	      scratches, saveds);
     INC_SIZE(1);
     return SLJIT_SUCCESS;
