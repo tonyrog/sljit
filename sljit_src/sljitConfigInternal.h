@@ -107,6 +107,7 @@
      SLJIT_F64_SECOND(reg) : provides the register index of the second 32 bit part of a 64 bit
                              floating point register when SLJIT_HAS_F64_AS_F32_PAIR returns non-zero
 */
+#include <stdint.h>
 
 #if (defined SLJIT_VERBOSE && SLJIT_VERBOSE) \
 	|| (defined SLJIT_DEBUG && SLJIT_DEBUG && (!defined(SLJIT_ASSERT) || !defined(SLJIT_UNREACHABLE)))

@@ -6,10 +6,10 @@
 #include <byteswap.h>
 #include <math.h>
 
-// #define DEBUG_ACCESS
-// #define DEBUG_FRAME
-// #define DEBUG_TRACE
-// #define DEBUG_STATE
+//#define DEBUG_ACCESS
+//#define DEBUG_FRAME
+//#define DEBUG_TRACE
+//#define DEBUG_STATE
 
 #ifdef DEBUG_ACCESS
 #define DBG_ACCESS(fmt,args...) \
@@ -37,6 +37,8 @@
 #else
 #define DUMP_STATE(st, pc)
 #endif
+
+#include "sljitSimd.h"
 
 
 // instruction formats (so far)
@@ -88,6 +90,8 @@ typedef enum {
     FMT_ATOMIC_LOAD = 46,
     FMT_ATOMIC_STORE = 47,
     FMT_RETURN_TO = 48,
+    // simd
+    FMT_SIMD_ARITH_OP2 = 100,
 } sljitter_fmt_t;
 
 #ifdef DEBUG_TRACE
@@ -139,7 +143,8 @@ const char* fmt_name[] =
     [FMT_SIMD_SIGN] = "simd_sign",
     [FMT_ATOMIC_LOAD] = "atomic_load",
     [FMT_ATOMIC_STORE] = "atomic_store",
-    [FMT_RETURN_TO] = "return_to"
+    [FMT_RETURN_TO] = "return_to",
+    [FMT_SIMD_ARITH_OP2] = "simd_arith_op2",
 };
 
 const char* op_name0[256] =
@@ -211,6 +216,17 @@ const char* op_name0[256] =
     [SLJIT_MUL_F64] = "mul_f64",
     [SLJIT_DIV_F64] = "div_f64",
     [SLJIT_COPYSIGN_F64] = "copysign_f64",
+};
+
+const char* simd_op_name[] =
+{
+    [SLJIT_SIMD_OP2_AND] = "vand",
+    [SLJIT_SIMD_OP2_OR] ="vor",
+    [SLJIT_SIMD_OP2_XOR] = "vxor",
+    [SLJIT_SIMD_OP2_SHUFFLE] = "vshuf",
+    [SLJIT_SIMD_ARITH_OP2_ADD] = "vadd",
+    [SLJIT_SIMD_ARITH_OP2_SUB] = "vsub",
+    [SLJIT_SIMD_ARITH_OP2_MUL] = "vmul",
 };
 
 const char* fcopy_name0[] =
@@ -289,13 +305,28 @@ static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
     case FMT_ATOMIC_STORE: break;
     case FMT_CONST: break;
     case FMT_OP_ADDR: break;
+    case FMT_SIMD_OP2:
+	// fixme: range check	
+	// fixme: add reg_x, elem_x, align_x
+	return (char*) simd_op_name[SLJIT_SIMD_GET_OPCODE(type)];
+    case FMT_SIMD_ARITH_OP2:
+	// fixme: range check
+	// fixme: add reg_x, elem_x, align_x
+	return (char*) simd_op_name[SLJIT_SIMD_GET_OPCODE(type)];
+    case FMT_SIMD_MOV:
+	// fixme: add align_x ... flags
+	switch(SLJIT_SIMD_GET_OPCODE(type)) {
+	case SLJIT_SIMD_LOAD: return "vload";
+	case SLJIT_SIMD_STORE: return "vstore";
+	default: return "unknown";
+	}
     case FMT_JUMP:
 	strcpy(name_buf, "jump");
 	strcat(name_buf, ".");
 	strcat(name_buf, jump_type(type));
 	return name_buf;
     default:
-	return ""; // no known op code
+	return "unknown";	
     }
     if ((nptr = op_name0[op & 0xff]) == NULL)
 	return "unknown";
@@ -313,6 +344,7 @@ static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
     }
     return (char*) name_buf;
 }
+
 
 #endif
 
@@ -488,6 +520,11 @@ static sljit_sw effective_addr(sljit_s32 dst, sljit_sw dstw, emulator_state_t* s
 #define TP   f64
 #define TYPE sljit_f64
 #include "sljitEmulatorfxx.i"
+
+#define TP   vec
+#define TYPE vec_t
+#include "sljitEmulatorvxx.i"
+
 
 #define INC_SIZE(s) compiler->size += (s)
 #define UNUSED(v) (void) v
@@ -911,6 +948,106 @@ static void mul_uw(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, slj
 }
 #endif
 
+
+static void vec_op(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp,
+		   sljit_s32 reg_size, sljit_s32 elem_size)
+{
+    int i = 0;
+    int n;
+
+    reg_size = (1 << reg_size);   // convert to bytes
+    if (reg_size > VSIZE)
+	reg_size = VSIZE;
+    n = reg_size >> elem_size;    // number of elements per vector
+    elem_size = (1 << elem_size); // convert to bytes
+
+    switch(SLJIT_SIMD_GET_OPCODE(type)) {
+    case SLJIT_SIMD_OP2_AND:
+	while (i < reg_size/8) {
+	    cp->vi64[i] = ap->vi64[i] & bp->vi64[i];
+	    i++;
+	}
+	break;
+    case SLJIT_SIMD_OP2_OR:
+	while (i < reg_size/8) {
+	    cp->vi64[i] = ap->vi64[i] | bp->vi64[i];
+	    i++;
+	}	
+	break;
+    case SLJIT_SIMD_OP2_XOR:
+	while (i < reg_size/8) {
+	    cp->vi64[i] = ap->vi64[i] ^ bp->vi64[i];
+	    i++;
+	}
+	break;
+    case SLJIT_SIMD_OP2_SHUFFLE:
+	break;
+	// arith
+    case SLJIT_SIMD_ARITH_OP2_ADD:
+	switch(elem_size) {
+	case ELEM_8:
+	    for (i = 0; i < n; i++) 
+		cp->vi8[i] = ap->vi8[i] + bp->vi8[i];
+	    break;
+	case ELEM_16:
+	    for (i = 0; i < n; i++) 
+		cp->vi16[i] = ap->vi16[i] + bp->vi16[i];
+	    break;
+	case ELEM_32:
+	    for (i = 0; i < n; i++) 
+		cp->vi32[i] = ap->vi32[i] + bp->vi32[i];
+	    break;    
+	case ELEM_64:
+	    for (i = 0; i < n; i++) 
+		cp->vi64[i] = ap->vi64[i] + bp->vi64[i];
+	    break;    	    
+	}
+	break;
+    case SLJIT_SIMD_ARITH_OP2_SUB:
+	switch(elem_size) {
+	case ELEM_8:
+	    for (i = 0; i < n; i++) 
+		cp->vi8[i] = ap->vi8[i] - bp->vi8[i];
+	    break;
+	case ELEM_16:
+	    for (i = 0; i < n; i++) 
+		cp->vi16[i] = ap->vi16[i] - bp->vi16[i];
+	    break;
+	case ELEM_32:
+	    for (i = 0; i < n; i++) 
+		cp->vi32[i] = ap->vi32[i] - bp->vi32[i];
+	    break;    
+	case ELEM_64:
+	    for (i = 0; i < n; i++) 
+		cp->vi64[i] = ap->vi64[i] - bp->vi64[i];
+	    break;
+	}
+	break;
+    case SLJIT_SIMD_ARITH_OP2_MUL:
+	switch(elem_size) {
+	case ELEM_8:
+	    for (i = 0; i < n; i++) 
+		cp->vi8[i] = ap->vi8[i] * bp->vi8[i];
+	    break;
+	case ELEM_16:
+	    for (i = 0; i < n; i++) 
+		cp->vi16[i] = ap->vi16[i] * bp->vi16[i];
+	    break;
+	case ELEM_32:
+	    for (i = 0; i < n; i++) 
+		cp->vi32[i] = ap->vi32[i] * bp->vi32[i];
+	    break;    
+	case ELEM_64:
+	    for (i = 0; i < n; i++) 
+		cp->vi64[i] = ap->vi64[i] * bp->vi64[i];
+	    break;
+	}
+	break;	
+    }
+
+}
+
+
 static sljitter_inst_t* new_inst(struct sljit_compiler *compiler,
 				 sljitter_fmt_t fmt,
 				 sljit_s32 op, sljit_s32 type)
@@ -925,6 +1062,23 @@ static sljitter_inst_t* new_inst(struct sljit_compiler *compiler,
 }
 
 #ifdef DEBUG_STATE
+static void dump_vec(FILE* fout, vec_t* ptr)
+{
+    int j;
+    fprintf(fout, "{0x%02x", ptr->vu8[0]);
+    for (j = 1; j < VSIZE; j++)
+	fprintf(fout, ",0x%02x", ptr->vu8[j]);
+    fprintf(fout, "}");
+}
+
+// dump VR0..VR15 
+static void dump_vr(FILE* fout, int i, emulator_state_t* st)
+{
+    fprintf(fout, "VR%d = ", i);
+    dump_vec(fout, &st->vr[i]);
+    fprintf(fout, "\r\n");
+}
+
 static void dump_state(emulator_state_t* st, sljit_sw pc)
 {
     int i, j;
@@ -940,6 +1094,8 @@ static void dump_state(emulator_state_t* st, sljit_sw pc)
     fprintf(stderr, "  SP = %lu\r\n", st->r[SLJIT_SP-1].uw);    
     for (i = 0; i < SLJIT_NUMBER_OF_FLOAT_REGISTERS; i++)
 	fprintf(stderr, "  FR%d = %f\r\n", i, st->fr[i].f64);
+    for (i = 0; i < SLJIT_NUMBER_OF_VECTOR_REGISTERS; i++)
+	dump_vr(stderr, i, st);
     for (i = 0; i < 16; i++) {
 	fprintf(stderr, "  mem[%04d]: ", i*16);
 	for (j = 0; j < 16; j++)
@@ -2034,7 +2190,7 @@ next:
 	case SLJIT_SUB_F64: {
 	    sljit_f64 a, b, c;
 	    load_f64(&a, prog[pc].src1, prog[pc].src1w, st);
-	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);	    
+	    load_f64(&b, prog[pc].src2, prog[pc].src2w, st);
 	    c = a-b;
 	    store_f64(c, prog[pc].dst, prog[pc].dstw, st);
 	    break;	    
@@ -2109,6 +2265,57 @@ next:
     case FMT_RETURN_TO:
 	DUMP_STATE(st, pc);	
 	return;
+
+    case FMT_SIMD_MOV: {
+	switch(SLJIT_SIMD_GET_OPCODE(prog[pc].type)) {
+	case SLJIT_SIMD_LOAD: {
+	    int i = prog[pc].dst & 0x7f;
+	    // fprintf(stderr, "simd_load: i=%d\r\n", i);
+	    if ((i >= 1) && (i <= SLJIT_NUMBER_OF_VECTOR_REGISTERS)) {
+		// fprintf(stderr, "load VR%d\r\n", i-1);
+		load_vec(&st->vr[i-1], prog[pc].src1, prog[pc].src1w, st);
+		// dump_vr(stderr, i-1, st);
+	    }
+	    break;
+	}
+	case SLJIT_SIMD_STORE: {
+	    int i = prog[pc].dst & 0x7f;
+	    // fprintf(stderr, "simd_store: i=%d\r\n", i);	    
+	    if ((i >= 1) && (i <= SLJIT_NUMBER_OF_VECTOR_REGISTERS)) {
+		// dst and src has reversed meaning here
+		// fprintf(stderr, "store VR%d\r\n", i-1);
+		// dump_vr(stderr, i-1, st);		
+		store_vec(&st->vr[i-1], prog[pc].src1, prog[pc].src1w, st);
+	    }
+	    break;
+	}
+	default:
+	    break;
+	}
+	break;
+    }
+	
+    case FMT_SIMD_OP2: {
+	sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(prog[pc].type);
+	sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(prog[pc].type);
+	vec_t a, b, c;
+	load_vec(&a, prog[pc].src1, 0, st);
+	load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
+	vec_op(prog[pc].type, &a, &b, &c, reg_size, elem_size);
+	store_vec(&c, prog[pc].dst, 0, st);
+	break;	
+    }
+	
+    case FMT_SIMD_ARITH_OP2: {
+	sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(prog[pc].type);
+	sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(prog[pc].type);
+	vec_t a, b, c;
+	load_vec(&a, prog[pc].src1, 0, st);
+	load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
+	vec_op(prog[pc].type, &a, &b, &c, reg_size, elem_size);
+	store_vec(&c, prog[pc].dst, 0, st);
+	break;
+    }
 
     default:
 	break;
@@ -2758,7 +2965,7 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 			      sljit_s32 src1_vreg,
 			      sljit_s32 src2, sljit_sw src2w)
 {
-    sljitter_inst_t* ip = new_inst(compiler, FMT_SIMD_OP2, 0, type);        
+    sljitter_inst_t* ip = new_inst(compiler, FMT_SIMD_OP2, 0, type);
     ip->dst = dst_vreg;
     ip->src1 = src1_vreg;
     ip->src2 = src2;
@@ -2766,6 +2973,22 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
     INC_SIZE(1);
     return SLJIT_SUCCESS;    
 }
+
+SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_arith_op2(struct sljit_compiler *compiler,
+							     sljit_s32 type,
+							     sljit_s32 dst_vreg,
+							     sljit_s32 src1_vreg,
+							     sljit_s32 src2, sljit_sw src2w)
+{
+    sljitter_inst_t* ip = new_inst(compiler, FMT_SIMD_ARITH_OP2, 0, type);
+    ip->dst = dst_vreg;
+    ip->src1 = src1_vreg;
+    ip->src2 = src2;
+    ip->src2w = src2w;
+    INC_SIZE(1);
+    return SLJIT_SUCCESS;    
+}
+
 
 SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_atomic_load(struct sljit_compiler *compiler,
 				 sljit_s32 op,
