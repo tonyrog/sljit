@@ -2620,10 +2620,15 @@ SLJIT_API_FUNC_ATTRIBUTE struct sljit_compiler *sljit_deserialize_compiler(sljit
 typedef struct {
     union {
 	sljit_u8  vu8[VSIZE/(sizeof(sljit_u8))];
+	sljit_s16 vu16[VSIZE/(sizeof(sljit_u16))];
+	sljit_s32 vu32[VSIZE/(sizeof(sljit_u32))];
+	uint64_t  vu64[VSIZE/(sizeof(uint64_t))];
+	
 	sljit_s8  vi8[VSIZE/(sizeof(sljit_s8))];
 	sljit_s16 vi16[VSIZE/(sizeof(sljit_s16))];
 	sljit_s32 vi32[VSIZE/(sizeof(sljit_s32))];
 	int64_t   vi64[VSIZE/(sizeof(int64_t))];
+	
 	sljit_f32 vf32[VSIZE/(sizeof(sljit_f32))];
 	sljit_f64 vf64[VSIZE/(sizeof(sljit_f64))];
     };

@@ -1,16 +1,32 @@
 #ifndef SLJIT_SIMD_H_
 #define SLJIT_SIMD_H_
 
-#define ELEM_8		0
-#define ELEM_16		1
-#define ELEM_32		2
-#define ELEM_64		3
-#define ELEM_128	4
-#define ELEM_256	5
+#define ELEM_8		0x00
+#define ELEM_16		0x01
+#define ELEM_32		0x02
+#define ELEM_64		0x03
+#define ELEM_128	0x04
+#define ELEM_256	0x05
+#define ELEM_F32	0x12
+#define ELEM_F64	0x13
 
 // arithmetic simd operations
 #define SLJIT_SIMD_ARITH_OP2_ADD        0x000005
 #define SLJIT_SIMD_ARITH_OP2_SUB        0x000006
 #define SLJIT_SIMD_ARITH_OP2_MUL        0x000007
+#define SLJIT_SIMD_ARITH_OP2_SLL        0x000008
+#define SLJIT_SIMD_ARITH_OP2_SRL        0x000009
+#define SLJIT_SIMD_ARITH_OP2_SRA        0x00000A
+#define SLJIT_SIMD_ARITH_OP2_CMP_LESS          0x00000B
+#define SLJIT_SIMD_ARITH_OP2_CMP_GREATER_EQUAL 0x00000C
+#define SLJIT_SIMD_ARITH_OP2_CMP_GREATER       0x00000D
+#define SLJIT_SIMD_ARITH_OP2_CMP_LESS_EQUAL    0x00000E
+#define SLJIT_SIMD_ARITH_OP2_CMP_EQUAL         0x00000F
+#define SLJIT_SIMD_ARITH_OP2_CMP_NOT_EQUAL     0x000010
+
+#define SLJIT_SIMD_ARITH_OP1_NEG        0x000100
+#define SLJIT_SIMD_ARITH_OP1_NOT        0x000101
+#define SLJIT_SIMD_ARITH_OP1_ABS        0x000102
+#define SLJIT_SIMD_ARITH_OP1_SQRT       0x000103
 
 #endif

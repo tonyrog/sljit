@@ -92,6 +92,7 @@ typedef enum {
     FMT_RETURN_TO = 48,
     // simd
     FMT_SIMD_ARITH_OP2 = 100,
+    FMT_SIMD_ARITH_OP1 = 101,    
 } sljitter_fmt_t;
 
 #ifdef DEBUG_TRACE
@@ -145,6 +146,7 @@ const char* fmt_name[] =
     [FMT_ATOMIC_STORE] = "atomic_store",
     [FMT_RETURN_TO] = "return_to",
     [FMT_SIMD_ARITH_OP2] = "simd_arith_op2",
+    [FMT_SIMD_ARITH_OP1] = "simd_arith_op1",
 };
 
 const char* op_name0[256] =
@@ -227,6 +229,20 @@ const char* simd_op_name[] =
     [SLJIT_SIMD_ARITH_OP2_ADD] = "vadd",
     [SLJIT_SIMD_ARITH_OP2_SUB] = "vsub",
     [SLJIT_SIMD_ARITH_OP2_MUL] = "vmul",
+    [SLJIT_SIMD_ARITH_OP2_SLL] = "vsll",
+    [SLJIT_SIMD_ARITH_OP2_SRL] = "vsrl",
+    [SLJIT_SIMD_ARITH_OP2_SRA] = "vsra",
+    [SLJIT_SIMD_ARITH_OP2_CMP_LESS] = "vlt",
+    [SLJIT_SIMD_ARITH_OP2_CMP_GREATER_EQUAL] = "vgte",
+    [SLJIT_SIMD_ARITH_OP2_CMP_GREATER] = "vgt",
+    [SLJIT_SIMD_ARITH_OP2_CMP_LESS_EQUAL] = "vlte",
+    [SLJIT_SIMD_ARITH_OP2_CMP_EQUAL] = "veq", 
+    [SLJIT_SIMD_ARITH_OP2_CMP_NOT_EQUAL = "vneq",
+    
+    [SLJIT_SIMD_ARITH_OP1_NEG] = "vneg",
+    [SLJIT_SIMD_ARITH_OP1_NOT] = "vnot",
+    [SLJIT_SIMD_ARITH_OP1_ABS] = "vabs",
+    [SLJIT_SIMD_ARITH_OP1_SQRT] = "vsqrt",
 };
 
 const char* fcopy_name0[] =
@@ -308,6 +324,8 @@ static char* op_name(sljit_s32 fmt, sljit_s32 op, sljit_s32 type)
     case FMT_SIMD_OP2:
 	// fixme: range check	
 	// fixme: add reg_x, elem_x, align_x
+	return (char*) simd_op_name[SLJIT_SIMD_GET_OPCODE(type)];
+    case FMT_SIMD_ARITH_OP1:
 	return (char*) simd_op_name[SLJIT_SIMD_GET_OPCODE(type)];
     case FMT_SIMD_ARITH_OP2:
 	// fixme: range check
@@ -948,10 +966,387 @@ static void mul_uw(cpu_flags_t* fp, cpu_flags_t set, sljit_uw a, sljit_uw b, slj
 }
 #endif
 
+#define op_sll(a,b) ((a) << (b))
+#define op_srl(a,b) ((a) >> (b))
+#define op_sra(a,b) ((a) >> (b))
+#define op_add(a,b) ((a) + (b))
+#define op_sub(a,b) ((a) - (b))
+#define op_mul(a,b) ((a) * (b))
+#define op_neg(a)   (-(a))
+#define op_lt(a,b)   (-((a)<(b)))
+#define op_lte(a,b)  (-((a)<=(b)))
+#define op_gt(a,b)   (-((a)>(b)))
+#define op_gte(a,b)  (-((a)>=(b)))
+#define op_eq(a,b)   (-((a)==(b)))
+#define op_neq(a,b)  (-((a)!=(b)))
 
-static void vec_op(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp,
-		   sljit_s32 reg_size, sljit_s32 elem_size)
+#define fop_sll(a,b) ((a) << (b))
+#define fop_srl(a,b) ((a) >> (b))
+#define fop_sra(a,b) ((a) >> (b))
+
+
+static int64_t isqrt(int64_t a)
 {
+    int64_t xk, ak;
+    if (a <= 0) return 0;
+    if (a == 1) return 1;
+    xk = a / 2;
+    ak = a / xk;
+    while(ak < xk) {
+	int64_t xk1 = (xk+ak) >> 1;
+	ak = a / xk1;
+	xk = xk1;
+    }
+    return xk;
+}
+
+#define VEC_OP2UIMM(op,fop,n,e,ap,imm,cp)				\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++) (cp)->vu8[i] = op((ap)->vu8[i],(imm)); \
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++) (cp)->vu16[i] = op((ap)->vu16[i],(imm)); \
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++) (cp)->vu32[i] = op((ap)->vu32[i],(imm)); \
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++) (cp)->vu64[i] = op((ap)->vu64[i],(imm)); \
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf32[i] = fop((ap)->vf32[i],(sljit_f32)(imm));	\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf64[i] = fop((ap)->vf64[i],(sljit_f64)(imm));	\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP2IMM(op,fop,n,e,ap,imm,cp)				\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++) (cp)->vi8[i] = op((ap)->vi8[i],(imm)); \
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++) (cp)->vi16[i] = op((ap)->vi16[i],(imm)); \
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++) (cp)->vi32[i] = op((ap)->vi32[i],(imm)); \
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++) (cp)->vi64[i] = op((ap)->vi64[i],(imm)); \
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf32[i] = fop((ap)->vf32[i],(sljit_f32)(imm));	\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf64[i] = fop((ap)->vf64[i],(sljit_f64)(imm));	\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP2MASK(op,n,e,ap,imm,cp)					\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++) (cp)->vi8[i] = op((ap)->vi8[i],(imm)); \
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++) (cp)->vi16[i] = op((ap)->vi16[i],(imm)); \
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++) (cp)->vi32[i] = op((ap)->vi32[i],(imm)); \
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++) (cp)->vi64[i] = op((ap)->vi64[i],(imm)); \
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vu32[i],(imm));			\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vu64[i],(imm));			\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP2(op,fop,n,e,ap,bp,cp)	\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi8[i] = op((ap)->vi8[i],(bp)->vi8[i]);		\
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi16[i] = op((ap)->vi16[i],(bp)->vi16[i]);		\
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi32[i] = op((ap)->vi32[i],(bp)->vi32[i]);		\
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi64[i] = op((ap)->vi64[i],(bp)->vi64[i]);		\
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf32[i] = fop((ap)->vf32[i],(bp)->vf32[i]);		\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf64[i] = fop((ap)->vf64[i],(bp)->vf64[i]);		\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP2_CMP(op,n,e,ap,bp,cp)	\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu8[i] = op((ap)->vi8[i],(bp)->vi8[i]);		\
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu16[i] = op((ap)->vi16[i],(bp)->vi16[i]);		\
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu32[i] = op((ap)->vi32[i],(bp)->vi32[i]);		\
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vi64[i],(bp)->vi64[i]);		\
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu32[i] = op((ap)->vf32[i],(bp)->vf32[i]);		\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vf64[i],(bp)->vf64[i]);		\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP2_CMP_IMM(op,n,e,ap,imm,cp)				\
+    switch((e)) {							\
+    int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu8[i] = op((ap)->vi8[i],(imm));			\
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu16[i] = op((ap)->vi16[i],(imm));		\
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu32[i] = op((ap)->vi32[i],(imm));		\
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vi64[i],(imm));			\
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu32[i] = op((ap)->vf32[i],(imm));			\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vu64[i] = op((ap)->vf64[i],(imm));			\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+#define VEC_OP1(op,fop,n,e,ap,cp)					\
+    switch((e)) {							\
+	int i;								\
+    case ELEM_8:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi8[i] = op((ap)->vi8[i]);				\
+	break;								\
+    case ELEM_16:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi16[i] = op((ap)->vi16[i]);				\
+	break;								\
+    case ELEM_32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi32[i] = op((ap)->vi32[i]);				\
+	break;								\
+    case ELEM_64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vi64[i] = op((ap)->vi64[i]);				\
+	break;								\
+    case ELEM_F32:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf32[i] = fop((ap)->vf32[i]);				\
+	break;								\
+    case ELEM_F64:							\
+	for (i = 0; i < (n); i++)					\
+	    (cp)->vf64[i] = fop((ap)->vf64[i]);				\
+	break;								\
+    default: return SLJIT_ERR_UNSUPPORTED;				\
+    }
+
+static sljit_s32 vec_opi2(sljit_s32 type, vec_t* ap, sljit_s32 imm, vec_t* cp)
+{
+    sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(type);
+    sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(type);
+    sljit_s32 elem_type = elem_size | ((type & SLJIT_SIMD_FLOAT) >> 6);
+    int n;
+
+    reg_size = (1 << reg_size);   // convert to bytes
+    if (reg_size > VSIZE)
+	reg_size = VSIZE;
+    n = reg_size >> elem_size;    // number of elements per vector
+
+    switch(SLJIT_SIMD_GET_OPCODE(type)) {
+    case SLJIT_SIMD_ARITH_OP2_ADD:
+	VEC_OP2IMM(op_add,op_add,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_SUB:
+	VEC_OP2IMM(op_sub,op_sub,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_MUL:
+	VEC_OP2IMM(op_mul,op_mul,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_SLL:
+	VEC_OP2MASK(op_sll,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_SRL:
+	VEC_OP2MASK(op_srl,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_SRA:
+	VEC_OP2MASK(op_sra,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_CMP_LESS:
+	VEC_OP2_CMP_IMM(op_lt,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_CMP_GREATER_EQUAL:
+	VEC_OP2_CMP_IMM(op_gte,n,elem_type,ap,imm,cp);
+	break;	
+    case SLJIT_SIMD_ARITH_OP2_CMP_GREATER:
+	VEC_OP2_CMP_IMM(op_gt,n,elem_type,ap,imm,cp);
+	break;		
+    case SLJIT_SIMD_ARITH_OP2_CMP_LESS_EQUAL:
+	VEC_OP2_CMP_IMM(op_lte,n,elem_type,ap,imm,cp);
+	break;			
+    case SLJIT_SIMD_ARITH_OP2_CMP_EQUAL:
+	VEC_OP2_CMP_IMM(op_eq,n,elem_type,ap,imm,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_CMP_NOT_EQUAL:
+	VEC_OP2_CMP_IMM(op_neq,n,elem_type,ap,imm,cp);
+	break;
+    default: 
+	break;
+    }
+    return SLJIT_SUCCESS;
+}
+
+
+static sljit_s32 vec_op1(sljit_s32 type, vec_t* ap, vec_t* cp)
+{
+    sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(type);
+    sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(type);
+    sljit_s32 elem_type = elem_size | ((type & SLJIT_SIMD_FLOAT) >> 6);
+    int i,n;
+
+    reg_size = (1 << reg_size);   // convert to bytes
+    if (reg_size > VSIZE)
+	reg_size = VSIZE;
+    n = reg_size >> elem_size;    // number of elements per vector
+
+    switch(SLJIT_SIMD_GET_OPCODE(type)) {
+    case SLJIT_SIMD_ARITH_OP1_NEG:
+	VEC_OP1(op_neg,op_neg,n,elem_type,ap,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP1_NOT:
+	while (i < reg_size/8) {
+	    cp->vi64[i] = ~ap->vi64[i];
+	    i++;
+	}
+	break;	
+    case SLJIT_SIMD_ARITH_OP1_ABS:
+	switch(elem_type) {
+	case ELEM_8:
+	    for (i = 0; i < (n); i++)
+		(cp)->vi8[i] = abs(ap->vi8[i]);
+	    break;
+	case ELEM_16:
+	    for (i = 0; i < (n); i++)
+		cp->vi16[i] =  abs(ap->vi16[i]);
+	    break;
+	case ELEM_32:
+	    for (i = 0; i < (n); i++)
+		cp->vi32[i] =  abs(ap->vi32[i]);
+	    break;
+	case ELEM_64:
+	    for (i = 0; i < (n); i++)
+		cp->vi32[i] =  labs(ap->vi64[i]);
+	    break;
+	case ELEM_F32:
+	    for (i = 0; i < (n); i++)
+		cp->vf32[i] = fabsf(ap->vf32[i]);
+	    break;
+	case ELEM_F64:
+	    for (i = 0; i < (n); i++)
+		cp->vf64[i] = fabs(ap->vf64[i]);
+	    break;
+	default:
+	    return SLJIT_ERR_UNSUPPORTED;
+	}	
+	break;	
+    case SLJIT_SIMD_ARITH_OP1_SQRT:
+	switch(elem_type) {
+	case ELEM_8:
+	    for (i = 0; i < (n); i++)
+		(cp)->vi8[i] = isqrt(ap->vi8[i]);
+	    break;
+	case ELEM_16:
+	    for (i = 0; i < (n); i++)
+		cp->vi16[i] =  isqrt(ap->vi16[i]);
+	    break;
+	case ELEM_32:
+	    for (i = 0; i < (n); i++)
+		cp->vi32[i] =  isqrt(ap->vi32[i]);
+	    break;
+	case ELEM_64:
+	    for (i = 0; i < (n); i++)
+		cp->vi32[i] =  isqrt(ap->vi64[i]);
+	    break;
+	case ELEM_F32:
+	    for (i = 0; i < (n); i++)
+		cp->vf32[i] = sqrtf(ap->vf32[i]);
+	    break;
+	case ELEM_F64:
+	    for (i = 0; i < (n); i++)
+		cp->vf64[i] = sqrt(ap->vf64[i]);
+	    break;
+	default:
+	    return SLJIT_ERR_UNSUPPORTED;
+	}
+	break;
+    default:
+	return SLJIT_ERR_UNSUPPORTED;
+    }
+    return SLJIT_SUCCESS;
+}
+
+static sljit_s32 vec_op2(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp)
+{
+    sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(type);
+    sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(type);
+    sljit_s32 elem_type = elem_size | ((type & SLJIT_SIMD_FLOAT) >> 6);
     int i = 0;
     int n;
 
@@ -959,7 +1354,6 @@ static void vec_op(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp,
     if (reg_size > VSIZE)
 	reg_size = VSIZE;
     n = reg_size >> elem_size;    // number of elements per vector
-    elem_size = (1 << elem_size); // convert to bytes
 
     switch(SLJIT_SIMD_GET_OPCODE(type)) {
     case SLJIT_SIMD_OP2_AND:
@@ -972,7 +1366,7 @@ static void vec_op(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp,
 	while (i < reg_size/8) {
 	    cp->vi64[i] = ap->vi64[i] | bp->vi64[i];
 	    i++;
-	}	
+	}
 	break;
     case SLJIT_SIMD_OP2_XOR:
 	while (i < reg_size/8) {
@@ -982,69 +1376,35 @@ static void vec_op(sljit_s32 type, vec_t* ap, vec_t* bp, vec_t* cp,
 	break;
     case SLJIT_SIMD_OP2_SHUFFLE:
 	break;
-	// arith
     case SLJIT_SIMD_ARITH_OP2_ADD:
-	switch(elem_size) {
-	case ELEM_8:
-	    for (i = 0; i < n; i++) 
-		cp->vi8[i] = ap->vi8[i] + bp->vi8[i];
-	    break;
-	case ELEM_16:
-	    for (i = 0; i < n; i++) 
-		cp->vi16[i] = ap->vi16[i] + bp->vi16[i];
-	    break;
-	case ELEM_32:
-	    for (i = 0; i < n; i++) 
-		cp->vi32[i] = ap->vi32[i] + bp->vi32[i];
-	    break;    
-	case ELEM_64:
-	    for (i = 0; i < n; i++) 
-		cp->vi64[i] = ap->vi64[i] + bp->vi64[i];
-	    break;    	    
-	}
+	VEC_OP2(op_add,op_add,n,elem_type,ap,bp,cp);
 	break;
     case SLJIT_SIMD_ARITH_OP2_SUB:
-	switch(elem_size) {
-	case ELEM_8:
-	    for (i = 0; i < n; i++) 
-		cp->vi8[i] = ap->vi8[i] - bp->vi8[i];
-	    break;
-	case ELEM_16:
-	    for (i = 0; i < n; i++) 
-		cp->vi16[i] = ap->vi16[i] - bp->vi16[i];
-	    break;
-	case ELEM_32:
-	    for (i = 0; i < n; i++) 
-		cp->vi32[i] = ap->vi32[i] - bp->vi32[i];
-	    break;    
-	case ELEM_64:
-	    for (i = 0; i < n; i++) 
-		cp->vi64[i] = ap->vi64[i] - bp->vi64[i];
-	    break;
-	}
+	VEC_OP2(op_sub,op_sub,n,elem_type,ap,bp,cp);
 	break;
     case SLJIT_SIMD_ARITH_OP2_MUL:
-	switch(elem_size) {
-	case ELEM_8:
-	    for (i = 0; i < n; i++) 
-		cp->vi8[i] = ap->vi8[i] * bp->vi8[i];
-	    break;
-	case ELEM_16:
-	    for (i = 0; i < n; i++) 
-		cp->vi16[i] = ap->vi16[i] * bp->vi16[i];
-	    break;
-	case ELEM_32:
-	    for (i = 0; i < n; i++) 
-		cp->vi32[i] = ap->vi32[i] * bp->vi32[i];
-	    break;    
-	case ELEM_64:
-	    for (i = 0; i < n; i++) 
-		cp->vi64[i] = ap->vi64[i] * bp->vi64[i];
-	    break;
-	}
+	VEC_OP2(op_mul,op_mul,n,elem_type,ap,bp,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_CMP_LESS:
+	VEC_OP2_CMP(op_lt,n,elem_type,ap,bp,cp);
+	break;
+    case SLJIT_SIMD_ARITH_OP2_CMP_GREATER_EQUAL:
+	VEC_OP2_CMP(op_gte,n,elem_type,ap,bp,cp);
 	break;	
+    case SLJIT_SIMD_ARITH_OP2_CMP_GREATER:
+	VEC_OP2_CMP(op_gt,n,elem_type,ap,bp,cp);
+	break;		
+    case SLJIT_SIMD_ARITH_OP2_CMP_LESS_EQUAL:
+	VEC_OP2_CMP(op_lte,n,elem_type,ap,bp,cp);
+	break;			
+    case SLJIT_SIMD_ARITH_OP2_CMP_EQUAL:
+	VEC_OP2_CMP(op_eq,n,elem_type,ap,bp,cp);
+	break;			
+    case SLJIT_SIMD_ARITH_OP2_CMP_NOT_EQUAL:
+	VEC_OP2_CMP(op_neq,n,elem_type,ap,bp,cp);
+	break;				    	
     }
-
+    return SLJIT_SUCCESS;    
 }
 
 
@@ -2296,27 +2656,45 @@ next:
     }
 	
     case FMT_SIMD_OP2: {
-	sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(prog[pc].type);
-	sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(prog[pc].type);
-	vec_t a, b, c;
-	load_vec(&a, prog[pc].src1, 0, st);
-	load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
-	vec_op(prog[pc].type, &a, &b, &c, reg_size, elem_size);
-	store_vec(&c, prog[pc].dst, 0, st);
+	if (prog[pc].src2 == SLJIT_IMM) {
+	    vec_t a, c;
+	    vec_opi2(prog[pc].type, &a, prog[pc].src2w, &c);
+	    store_vec(&c, prog[pc].dst, 0, st);
+	}
+	else {
+	    vec_t a, b, c;
+	    load_vec(&a, prog[pc].src1, 0, st);
+	    load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
+	    vec_op2(prog[pc].type, &a, &b, &c);
+	    store_vec(&c, prog[pc].dst, 0, st);
+	}
 	break;	
     }
 	
     case FMT_SIMD_ARITH_OP2: {
-	sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(prog[pc].type);
-	sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(prog[pc].type);
-	vec_t a, b, c;
-	load_vec(&a, prog[pc].src1, 0, st);
-	load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
-	vec_op(prog[pc].type, &a, &b, &c, reg_size, elem_size);
-	store_vec(&c, prog[pc].dst, 0, st);
+	if (prog[pc].src2 == SLJIT_IMM) {
+	    vec_t a, c;
+	    vec_opi2(prog[pc].type, &a, prog[pc].src2w, &c);
+	    store_vec(&c, prog[pc].dst, 0, st);
+	}
+	else {
+	    vec_t a, b, c;
+	    load_vec(&a, prog[pc].src1, 0, st);
+	    load_vec(&b, prog[pc].src2, prog[pc].src2w, st);
+	    vec_op2(prog[pc].type, &a, &b, &c);
+	    store_vec(&c, prog[pc].dst, 0, st);
+	}
 	break;
     }
 
+    case FMT_SIMD_ARITH_OP1: {
+	vec_t a, c;
+	load_vec(&a, prog[pc].src1, prog[pc].src1w, st);
+	vec_op1(prog[pc].type, &a, &c);
+	store_vec(&c, prog[pc].dst, 0, st);
+	break;
+    }
+	
     default:
 	break;
     }
@@ -2985,6 +3363,19 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_arith_op2(struct sljit_compil
     ip->src1 = src1_vreg;
     ip->src2 = src2;
     ip->src2w = src2w;
+    INC_SIZE(1);
+    return SLJIT_SUCCESS;    
+}
+
+SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_arith_op1(struct sljit_compiler *compiler,
+							     sljit_s32 type,
+							     sljit_s32 dst_vreg,
+							     sljit_s32 src1, sljit_sw src1w)
+{
+    sljitter_inst_t* ip = new_inst(compiler, FMT_SIMD_ARITH_OP1, 0, type);
+    ip->dst = dst_vreg;
+    ip->src1 = src1;
+    ip->src1w = src1w;
     INC_SIZE(1);
     return SLJIT_SUCCESS;    
 }
